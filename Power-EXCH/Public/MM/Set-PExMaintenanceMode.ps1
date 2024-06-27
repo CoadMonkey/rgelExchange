@@ -6,6 +6,8 @@
 	Put Exchange Server in Maintenance Mode.
 .DESCRIPTION
 	This function puts Exchange Server into Maintenance Mode.
+.PARAMETER Server
+    Exchange server name or object representing Exchange server
 .EXAMPLE
 	PS C:\> Set-PExMaintenanceMode
 .EXAMPLE
@@ -20,24 +22,35 @@
 	Version 1.3 :: 27-Aug-2023  :: [Improve] :: Warn about active mailbox move requests
 	Version 1.4 :: 27-Aug-2023  :: [Improve] :: Shutdown option
 	Version 1.5 :: 03-Sep-2023  :: [Improve] :: Warn about additional servers in MM
+    Version 1.6 :: 27-Jun-2024  :: [Improve] :: Add ability to run from admin workstation -CoadMonkey
+                                :: [Bugfix]  :: Divide by 0 error if no mounted databases
 .LINK
 	https://ps1code.com/2024/02/05/pexmm/
 #>
 	
 	[CmdletBinding(ConfirmImpact = 'High', SupportsShouldProcess)]
 	[Alias('Enter-PExMaintenanceMode', 'Enable-PExMaintenanceMode', 'Enter-PExMM')]
-	Param ()
+	Param (
+		[Parameter(Mandatory, ValueFromPipeline, ValueFromPipelineByPropertyName, HelpMessage = 'Exchange server name or object representing Exchange server')]
+		[Alias('Name')]
+		[string]$Server = $($env:COMPUTERNAME)
+	)
 	
 	Begin
 	{
 		$FunctionName = '{0}' -f $MyInvocation.MyCommand
 		Write-Verbose "$FunctionName :: Started at [$(Get-Date)]" -Verbose:$true
-		$Server = $($env:COMPUTERNAME)
-		$i = 0
+        If ($Server -notin (Get-ExchangeServer).name) {
+            throw "$Server is not an Exchange server. Use -Server to specify a different name."
+        }
+        $RunLocal = $False
+        If ($env:COMPUTERNAME -eq $Server) { $RunLocal = $True }
+        $i = 0
 		$TotalStep = 6
 		$WarningPreference = 'SilentlyContinue'
 		$Domain = [System.DirectoryServices.ActiveDirectory.Domain]::GetCurrentDomain().Name
 		$Fqdn = ([System.Net.Dns]::GetHostByName($env:COMPUTERNAME)).HostName
+        $QueueTolerance = 0
 	}
 	Process
 	{
@@ -50,7 +63,14 @@
 		}
 		
 		### Warn about another servers in MM ###
-		if ($CurrentMM = Get-ClusterNode | Where-Object { $_.State -ne 'Up' })
+        If ($RunLocal) {
+            $CurrentMM = Get-ClusterNode | Where-Object { $_.PSComputerName -ne $Server -and $_.State -ne 'Up' }
+        } Else {
+            $CurrentMM = Invoke-Command -ComputerName $Server -ScriptBlock {
+                Get-ClusterNode | Where-Object { $_.PSComputerName -ne $Server -and $_.State -ne 'Up' }
+            }
+        }    
+		if ($CurrentMM)
 		{
 			$MMCount = ($CurrentMM | Measure-Object -Property Name -Line).Lines
 			if ($MMCount -eq 1) { Write-Warning "There is additional server in the Maintenance Mode" -Verbose:$true }
@@ -70,9 +90,14 @@
 		
 		### Redirect any queued messages to another DAG members ###
 		$i++
-		$TargetHostname = Get-ClusterNode | Where-Object { $_.Name -ne $Server -and $_.State -eq 'Up' } | Sort-Object { Get-Random } | Select-Object -First 1
+        If ($RunLocal) {
+       		$TargetHostname = Get-ClusterNode | Where-Object { $_.Name -ne $Server -and $_.State -eq 'Up' } | Sort-Object { Get-Random } | Select-Object -First 1
+        } Else {
+            $TargetHostname = Invoke-Command -ComputerName $Server -ScriptBlock {
+                Get-ClusterNode | Where-Object { $_.Name -ne $Using:Server -and $_.State -eq 'Up' } | Sort-Object { Get-Random } | Select-Object -First 1
+            }
+        }    
 		$TargetFqdn = "$($TargetHostname).$($Domain)"
-		
 		$ServerStatus = Get-PExMaintenanceMode -Server $Server
 		$TargetServerStatus = Get-PExMaintenanceMode -Server $TargetHostname
 		if (@($ServerStatus.State, $TargetServerStatus.State) -notcontains 'Maintenance')
@@ -105,7 +130,7 @@
 									   -PercentComplete ($QueuePercent * 100) -Id 1
 						Start-Sleep -Seconds 30
 					}
-					while ($QueueLengthNow -gt 20)
+					while ($QueueLengthNow -gt $QueueTolerance)
 					Write-Progress -Activity "Completed" -Completed -Id 1
 				}
 				else
@@ -127,10 +152,17 @@
 						   -Status "Exchange server: $($Server)" `
 						   -CurrentOperation "Current operation: [Step $i of $TotalStep] Suspend Server from the DAG" `
 						   -PercentComplete ($i/$($TotalStep) * 100) -Id 0
-			Suspend-ClusterNode $Server -Wait -Drain -Confirm:$false | Out-Null
+            If ($RunLocal) {
+                Suspend-ClusterNode $Server -Wait -Drain -Confirm:$false | Out-Null
+                Get-ClusterNode | Select-Object Name, Cluster, ID, State -Unique | Format-Table -AutoSize
+            } Else {
+                Invoke-Command -ComputerName $Server -ScriptBlock {
+                    Suspend-ClusterNode $Using:Server -Wait -Drain -Confirm:$false | Out-Null
+                    Get-ClusterNode | Select-Object Name, Cluster, ID, State -Unique | Format-Table -AutoSize
+                }
+            }    
 		}
-		Get-ClusterNode | Select-Object Name, Cluster, ID, State -Unique | Format-Table -AutoSize
-		
+
 		### Disable DB copy automatic activation and move any active DB copies to other DAG members ###
 		$i++
 		if ($PSCmdlet.ShouldProcess("Server [$($Server)]", "[Step $i of $TotalStep] Disable DB copy automatic activation & Move any active DB copies to other DAG members"))
@@ -146,20 +178,22 @@
 			Set-MailboxServer $Server -DatabaseCopyAutoActivationPolicy Blocked -Confirm:$false
 			
 			### Wait for any database copies that are still mounted on the server ###
-			Write-Verbose "Waiting for any database copies that are still mounted on the server ..." -Verbose:$true
-			do
-			{
-				$dbMounted = Get-MailboxDatabaseCopyStatus -Server $Server | Where-Object { $_.Status -eq "Mounted" }
-				$dbMounted | Select-Object Name, DatabaseName, Status, CopyQueueLength | Sort-Object DatabaseName
-				$dbMounteNow = ($dbMounted | Measure-Object -Property Name -Line).Lines -replace '^$', '0'
-				Write-Progress -Activity "Waiting for [Step $i]" `
-							   -Status "Moving $($dbMountedCount) DB copies to other DAG members ..." `
-							   -CurrentOperation "Currently mounted: $($dbMounteNow) DB copies" `
-							   -PercentComplete ($($dbMountedCount - [int]$dbMounteNow)/$($dbMountedCount) * 100) -Id 2
-				Start-Sleep -Seconds 30
-			}
-			while ($dbMounted)
-			Write-Progress -Activity "Completed" -Completed -Id 2
+			If ($dbMountedCount) {
+                Write-Verbose "Waiting for any database copies that are still mounted on the server ..." -Verbose:$true
+			    do
+			    {
+				    $dbMounted = Get-MailboxDatabaseCopyStatus -Server $Server | Where-Object { $_.Status -eq "Mounted" }
+				    $dbMounted | Select-Object Name, DatabaseName, Status, CopyQueueLength | Sort-Object DatabaseName
+				    $dbMounteNow = ($dbMounted | Measure-Object -Property Name -Line).Lines -replace '^$', '0'
+				    Write-Progress -Activity "Waiting for [Step $i]" `
+							       -Status "Moving $($dbMountedCount) DB copies to other DAG members ..." `
+							       -CurrentOperation "Currently mounted: $($dbMounteNow) DB copies" `
+							       -PercentComplete ($($dbMountedCount - [int]$dbMounteNow)/$($dbMountedCount) * 100) -Id 2
+				    Start-Sleep -Seconds 30
+			    }
+			    while ($dbMounted)
+			    Write-Progress -Activity "Completed" -Completed -Id 2
+            }
 		}
 		
 		### Put the server into Maintenance ###

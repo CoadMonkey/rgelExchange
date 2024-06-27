@@ -6,6 +6,8 @@
 	Exit Exchange Server Maintenance Mode.
 .DESCRIPTION
 	This function takes Exchange Server out of Maintenance Mode.
+.PARAMETER Server
+    Exchange server name or object representing Exchange server
 .EXAMPLE
 	PS C:\> Exit-PExMaintenanceMode
 .EXAMPLE
@@ -14,20 +16,35 @@
 	Author      :: @ps1code
 	Version 1.0 :: 26-Dec-2021  :: [Release] :: Beta
 	Version 1.1 :: 03-Aug-2022  :: [Improve] :: Progress bar and steps counter, Parameter free function, Disk status check
+    Version 1.2 :: 27-Jun-2024  :: [Improve] :: Add ability to run from admin workstation -CoadMonkey
 .LINK
 	https://ps1code.com/2024/02/05/pexmm/
 #>
 	
 	[CmdletBinding(ConfirmImpact = 'High', SupportsShouldProcess)]
 	[Alias('Cancel-PExMaintenanceMode', 'Disable-PExMaintenanceMode', 'Exit-PExMM')]
-	Param ()
+	Param (
+		[Parameter(Mandatory, ValueFromPipeline, ValueFromPipelineByPropertyName, HelpMessage = 'Exchange server name or object representing Exchange server')]
+		[Alias('Name')]
+		[string]$Server = $($env:COMPUTERNAME)
+	)
 	
 	Begin
 	{
 		$FunctionName = '{0}' -f $MyInvocation.MyCommand
 		Write-Verbose "$FunctionName :: Started at [$(Get-Date)]" -Verbose:$true
-		$Server = $($env:COMPUTERNAME)
-		$DAG = (Get-Cluster).Name
+        If ($Server -notin (Get-ExchangeServer).name) {
+            throw "$Server is not an Exchange server. Use -Server to specify a different name."
+        }
+        $RunLocal = $False
+        If ($env:COMPUTERNAME -eq $Server) { $RunLocal = $True }
+        If ($RunLocal) {
+            $DAG = (Get-Cluster).Name
+        } Else {
+            $DAG = Invoke-Command -ComputerName $Server -ScriptBlock {
+                (Get-Cluster).Name
+            }
+        }
 		$i = 0
 		$TotalStep = 6
 		$WarningPreference = 'SilentlyContinue'
@@ -69,7 +86,14 @@
 		
 		### Resume DAG Cluster Node ###
 		$i++
-		if ((Get-ClusterNode -Name $Server).State -eq 'Paused')
+        If ($RunLocal) {
+            $ClusterNode = (Get-ClusterNode -Name $Server).State -eq 'Paused'
+        } Else {
+            $ClusterNode = Invoke-Command -ComputerName $Server -ScriptBlock {
+                (Get-ClusterNode -Name $Using:Server).State -eq 'Paused'
+            }
+        }
+		if ($ClusterNode)
 		{
 			if ($PSCmdlet.ShouldProcess("Server [$($Server)]", "[Step $i of $TotalStep] Resume DAG Cluster Node"))
 			{
@@ -77,10 +101,22 @@
 							   -Status "Exchange server: $($Server)" `
 							   -CurrentOperation "Current operation: [Step $i of $TotalStep] Resume DAG Cluster Node" `
 							   -PercentComplete ($i/$($TotalStep) * 100)
-				Resume-ClusterNode -Name $Server | Out-Null
+                If ($RunLocal) {
+                    Resume-ClusterNode -Name $Server | Out-Null
+                } Else {
+                    Invoke-Command -ComputerName $Server -ScriptBlock {
+                        Resume-ClusterNode -Name $Using:Server | Out-Null
+                    }
+                }
 			}
 		}
-		Get-ClusterNode | Select-Object Name, Cluster, ID, State -Unique | Format-Table -AutoSize
+        If ($RunLocal) {
+            Get-ClusterNode | Select-Object Name, Cluster, ID, State -Unique | Format-Table -AutoSize
+        } Else {
+            Invoke-Command -ComputerName $Server -ScriptBlock {
+                Get-ClusterNode | Select-Object Name, Cluster, ID, State -Unique | Format-Table -AutoSize
+            }
+        }
 		
 		### Enable DB copy automatic activation ###
 		$i++
@@ -124,7 +160,13 @@
 	}
 	End
 	{
-		Get-ClusterNode | Select-Object Name, Cluster, ID, State -Unique | Format-Table -AutoSize
+        If ($RunLocal) {
+            Get-ClusterNode | Select-Object Name, Cluster, ID, State -Unique | Format-Table -AutoSize
+        } Else {
+            Invoke-Command -ComputerName $Server -ScriptBlock {
+                Get-ClusterNode | Select-Object Name, Cluster, ID, State -Unique | Format-Table -AutoSize
+            }
+        }
 		Write-Verbose "$FunctionName :: Finished at [$(Get-Date)]" -Verbose:$true
 	}	
 }
