@@ -24,6 +24,8 @@
 	Version 1.5 :: 03-Sep-2023  :: [Improve] :: Warn about additional servers in MM
     Version 1.6 :: 27-Jun-2024  :: [Improve] :: Add ability to run from admin workstation -CoadMonkey
                                 :: [Bugfix]  :: Divide by 0 error if no mounted databases
+    Version 1.7 :: 5-Jul-2024   :: [Bugfix]  :: Queue redirect not filtering out ShadowRedundancy queues -CoadMonkey
+
 .LINK
 	https://ps1code.com/2024/02/05/pexmm/
 #>
@@ -73,8 +75,8 @@
 		if ($CurrentMM)
 		{
 			$MMCount = ($CurrentMM | Measure-Object -Property Name -Line).Lines
-			if ($MMCount -eq 1) { Write-Warning "There is additional server in the Maintenance Mode" -Verbose:$true }
-			else { Write-Warning "There are additional $($MMCount) servers in the Maintenance Mode" -Verbose:$true }
+			if ($MMCount -eq 1) { Write-Warning "There is an additional server in Maintenance Mode" -Verbose:$true }
+			else { Write-Warning "There are $($MMCount) additional servers in Maintenance Mode" -Verbose:$true }
 		}
 		
 		### Set the Hub Transport service to draining. It will stop accepting any more messages ###
@@ -116,10 +118,10 @@
 				if ($QueueLength)
 				{
 					### Wait the transport queue would be empty or almost empty ###
-					Write-Verbose "Waiting for the transport queue would be almost empty ..." -Verbose:$true
+					Write-Verbose "Waiting for the transport queue to empty below $QueueTolerance ..." -Verbose:$true
 					do
 					{
-						$Queue = Get-Queue -Server $Server -ErrorAction SilentlyContinue
+						$Queue = Get-Queue -Server $Server -ErrorAction SilentlyContinue|? {$_.DeliveryType -ne "ShadowRedundancy"}
 						$Queue | Select-Object Identity, DeliveryType, Status, MessageCount
 						$QueueLengthNow = ($Queue | Measure-Object -Property MessageCount -Sum).Sum
 						$QueuePercent = if ($QueueLength -eq 0) { 1 }
@@ -150,7 +152,7 @@
 		{
 			Write-Progress -Activity "$($FunctionName)" `
 						   -Status "Exchange server: $($Server)" `
-						   -CurrentOperation "Current operation: [Step $i of $TotalStep] Suspend Server from the DAG" `
+						   -CurrentOperation "Current operation: [Step $i of $TotalStep] Suspend Server from Cluster node" `
 						   -PercentComplete ($i/$($TotalStep) * 100) -Id 0
             If ($RunLocal) {
                 Suspend-ClusterNode $Server -Wait -Drain -Confirm:$false | Out-Null
@@ -198,7 +200,7 @@
 		
 		### Put the server into Maintenance ###
 		$i++
-		if ($PSCmdlet.ShouldProcess("Server [$($Server)]", "[Step $i of $TotalStep] Put the server into Maintenance"))
+		if ($PSCmdlet.ShouldProcess("Server [$($Server)]", "[Step $i of $TotalStep] Set Server component states to ServerWideOffline"))
 		{
 			Write-Progress -Activity "$($FunctionName)" `
 						   -Status "Exchange server: $($Server)" `
