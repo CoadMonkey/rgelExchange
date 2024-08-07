@@ -1,4 +1,4 @@
-﻿Function Set-PExMaintenanceMode
+Function Set-PExMaintenanceMode
 {
 	
 <#
@@ -25,6 +25,7 @@
     Version 1.6 :: 27-Jun-2024  :: [Improve] :: Add ability to run from admin workstation -CoadMonkey
                                 :: [Bugfix]  :: Divide by 0 error if no mounted databases
     Version 1.7 :: 5-Jul-2024   :: [Bugfix]  :: Queue redirect not filtering out ShadowRedundancy queues -CoadMonkey
+    Version 1.8 :: 7-Aug-2024   :: [Bugfix]  :: Infinite loop waiting for databases when a non-DAG database exists -CoadMonkey
 
 .LINK
 	https://ps1code.com/2024/02/05/pexmm/
@@ -178,6 +179,9 @@
 			
 			Set-MailboxServer $Server -DatabaseCopyActivationDisabledAndMoveNow:$true -Confirm:$false
 			Set-MailboxServer $Server -DatabaseCopyAutoActivationPolicy Blocked -Confirm:$false
+
+            ## Simply dismount databases who are not in a DAG
+            get-mailboxdatabase -Server $Server|? {$_.ReplicationType -eq "None"}|Dismount-Database -Confirm:$False
 			
 			### Wait for any database copies that are still mounted on the server ###
 			If ($dbMountedCount) {
