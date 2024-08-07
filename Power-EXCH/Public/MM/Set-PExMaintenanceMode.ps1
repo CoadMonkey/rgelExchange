@@ -22,10 +22,11 @@ Function Set-PExMaintenanceMode
 	Version 1.3 :: 27-Aug-2023  :: [Improve] :: Warn about active mailbox move requests
 	Version 1.4 :: 27-Aug-2023  :: [Improve] :: Shutdown option
 	Version 1.5 :: 03-Sep-2023  :: [Improve] :: Warn about additional servers in MM
-    Version 1.6 :: 27-Jun-2024  :: [Improve] :: Add ability to run from admin workstation -CoadMonkey
-                                :: [Bugfix]  :: Divide by 0 error if no mounted databases
+    Version 1.6 :: 27-Jun-2024  :: [Improve] :: Add ability to run from admin workstation
+                                :: [Bugfix]  :: Divide by 0 error if no mounted databases -CoadMonkey
     Version 1.7 :: 5-Jul-2024   :: [Bugfix]  :: Queue redirect not filtering out ShadowRedundancy queues -CoadMonkey
-    Version 1.8 :: 7-Aug-2024   :: [Bugfix]  :: Infinite loop waiting for databases when a non-DAG database exists -CoadMonkey
+    Version 1.8 :: 7-Aug-2024   :: [Bugfix]  :: Infinite loop waiting for databases when a non-DAG database exists
+                                :: [Bugfix]  :: Errors when Server is not a DAG member -CoadMonkey
 
 .LINK
 	https://ps1code.com/2024/02/05/pexmm/
@@ -49,7 +50,12 @@ Function Set-PExMaintenanceMode
         $RunLocal = $False
         If ($env:COMPUTERNAME -eq $Server) { $RunLocal = $True }
         $i = 0
-		$TotalStep = 6
+        $MailboxServer = Get-MailboxServer -Identity $Server
+        If ( $MailboxServer.DatabaseAvailabilityGroup -eq $null ) {    # If Server is not a DAG member
+            $TotalStep = 4
+        } Else {
+            $TotalStep = 6
+        }        
 		$WarningPreference = 'SilentlyContinue'
 		$Domain = [System.DirectoryServices.ActiveDirectory.Domain]::GetCurrentDomain().Name
 		$Fqdn = ([System.Net.Dns]::GetHostByName($env:COMPUTERNAME)).HostName
@@ -66,20 +72,22 @@ Function Set-PExMaintenanceMode
 		}
 		
 		### Warn about another servers in MM ###
-        If ($RunLocal) {
-            $CurrentMM = Get-ClusterNode | Where-Object { $_.PSComputerName -ne $Server -and $_.State -ne 'Up' }
-        } Else {
-            $CurrentMM = Invoke-Command -ComputerName $Server -ScriptBlock {
-                Get-ClusterNode | Where-Object { $_.PSComputerName -ne $Server -and $_.State -ne 'Up' }
-            }
-        }    
-		if ($CurrentMM)
-		{
-			$MMCount = ($CurrentMM | Measure-Object -Property Name -Line).Lines
-			if ($MMCount -eq 1) { Write-Warning "There is an additional server in Maintenance Mode" -Verbose:$true }
-			else { Write-Warning "There are $($MMCount) additional servers in Maintenance Mode" -Verbose:$true }
-		}
-		
+        If ( $MailboxServer.DatabaseAvailabilityGroup -ne $null ) {    # Skip if Server is not a DAG member
+            If ($RunLocal) {
+                $CurrentMM = Get-ClusterNode | Where-Object { $_.PSComputerName -ne $Server -and $_.State -ne 'Up' }
+            } Else {
+                $CurrentMM = Invoke-Command -ComputerName $Server -ScriptBlock {
+                    Get-ClusterNode | Where-Object { $_.PSComputerName -ne $Server -and $_.State -ne 'Up' }
+                }
+            }    
+		    if ($CurrentMM)
+		    {
+			    $MMCount = ($CurrentMM | Measure-Object -Property Name -Line).Lines
+			    if ($MMCount -eq 1) { Write-Warning "There is an additional server in Maintenance Mode" -Verbose:$true }
+			    else { Write-Warning "There are $($MMCount) additional servers in Maintenance Mode" -Verbose:$true }
+		    }
+        }		
+
 		### Set the Hub Transport service to draining. It will stop accepting any more messages ###
 		$i++
 		if ($PSCmdlet.ShouldProcess("Server [$($Server)]", "[Step $i of $TotalStep] Set the Hub Transport service to draining"))
@@ -91,15 +99,19 @@ Function Set-PExMaintenanceMode
 			Set-ServerComponentState -Identity $Server -Component HubTransport -State Draining -Requester Maintenance -Confirm:$false
 		}
 		
-		### Redirect any queued messages to another DAG members ###
+		### Redirect any queued messages to another DAG member ###
 		$i++
-        If ($RunLocal) {
-       		$TargetHostname = Get-ClusterNode | Where-Object { $_.Name -ne $Server -and $_.State -eq 'Up' } | Sort-Object { Get-Random } | Select-Object -First 1
-        } Else {
-            $TargetHostname = Invoke-Command -ComputerName $Server -ScriptBlock {
-                Get-ClusterNode | Where-Object { $_.Name -ne $Using:Server -and $_.State -eq 'Up' } | Sort-Object { Get-Random } | Select-Object -First 1
+        If ( $MailboxServer.DatabaseAvailabilityGroup -ne $null ) {    # Skip if Server is not a DAG member
+            If ($RunLocal) {
+       		    $TargetHostname = Get-ClusterNode | Where-Object { $_.Name -ne $Server -and $_.State -eq 'Up' } | Sort-Object { Get-Random } | Select-Object -First 1
+            } Else {
+                $TargetHostname = Invoke-Command -ComputerName $Server -ScriptBlock {
+                    Get-ClusterNode | Where-Object { $_.Name -ne $Using:Server -and $_.State -eq 'Up' } | Sort-Object { Get-Random } | Select-Object -First 1
+                }
             }
-        }    
+        } Else {
+            $TargetHostname = (Get-ExchangeServer | Where-Object { $_.Name -ne $Server } | Sort-Object { Get-Random } | Select-Object -First 1).name
+        }
 		$TargetFqdn = "$($TargetHostname).$($Domain)"
 		$ServerStatus = Get-PExMaintenanceMode -Server $Server
 		$TargetServerStatus = Get-PExMaintenanceMode -Server $TargetHostname
@@ -144,71 +156,76 @@ Function Set-PExMaintenanceMode
 		}
 		else
 		{
-			throw "Either source or target server is already in Maintenance Mode !"
+			throw "Either source [$Server] or target [$TargetHostname] is already in Maintenance Mode!"
 		}
 		
 		### Suspend Server from the DAG ###
-		$i++
-		if ($PSCmdlet.ShouldProcess("Server [$($Server)]", "[Step $i of $TotalStep] Suspend Server from the DAG"))
-		{
-			Write-Progress -Activity "$($FunctionName)" `
-						   -Status "Exchange server: $($Server)" `
-						   -CurrentOperation "Current operation: [Step $i of $TotalStep] Suspend Server from Cluster node" `
-						   -PercentComplete ($i/$($TotalStep) * 100) -Id 0
-            If ($RunLocal) {
-                Suspend-ClusterNode $Server -Wait -Drain -Confirm:$false | Out-Null
-                Get-ClusterNode | Select-Object Name, Cluster, ID, State -Unique | Format-Table -AutoSize
-            } Else {
-                Invoke-Command -ComputerName $Server -ScriptBlock {
-                    Suspend-ClusterNode $Using:Server -Wait -Drain -Confirm:$false | Out-Null
+        If ( $MailboxServer.DatabaseAvailabilityGroup -ne $null ) {    # Skip if Server is not a DAG member
+		    $i++
+		    if ($PSCmdlet.ShouldProcess("Server [$($Server)]", "[Step $i of $TotalStep] Suspend Server from the DAG"))
+		    {
+			    Write-Progress -Activity "$($FunctionName)" `
+						       -Status "Exchange server: $($Server)" `
+						       -CurrentOperation "Current operation: [Step $i of $TotalStep] Suspend Server from Cluster node" `
+						       -PercentComplete ($i/$($TotalStep) * 100) -Id 0
+                If ($RunLocal) {
+                    Suspend-ClusterNode $Server -Wait -Drain -Confirm:$false | Out-Null
                     Get-ClusterNode | Select-Object Name, Cluster, ID, State -Unique | Format-Table -AutoSize
-                }
-            }    
-		}
+                } Else {
+                    Invoke-Command -ComputerName $Server -ScriptBlock {
+                        Suspend-ClusterNode $Using:Server -Wait -Drain -Confirm:$false | Out-Null
+                        Get-ClusterNode | Select-Object Name, Cluster, ID, State -Unique | Format-Table -AutoSize
+                    }
+                }    
+		    }
+        }
 
 		### Disable DB copy automatic activation and move any active DB copies to other DAG members ###
-		$i++
-		if ($PSCmdlet.ShouldProcess("Server [$($Server)]", "[Step $i of $TotalStep] Disable DB copy automatic activation & Move any active DB copies to other DAG members"))
-		{
-			Write-Progress -Activity "$($FunctionName)" `
-						   -Status "Exchange server: $($Server)" `
-						   -CurrentOperation "Current operation: [Step $i of $TotalStep] Disable DB copy automatic activation & Move any active DB copies to other DAG members" `
-						   -PercentComplete ($i/$($TotalStep) * 100) -Id 0
-			### Save mounted DB copies stats before moving ###
-			$dbMountedCount = (Get-MailboxDatabaseCopyStatus -Server $Server | Where-Object { $_.Status -eq "Mounted" } | Measure-Object -Property Name -Line).Lines
+        If ( $MailboxServer.DatabaseAvailabilityGroup -ne $null ) {    # Skip if Server is not a DAG member
+		    $i++
+		    if ($PSCmdlet.ShouldProcess("Server [$($Server)]", "[Step $i of $TotalStep] Disable DB copy automatic activation & Move any active DB copies to other DAG members"))
+		    {
+			    Write-Progress -Activity "$($FunctionName)" `
+						       -Status "Exchange server: $($Server)" `
+						       -CurrentOperation "Current operation: [Step $i of $TotalStep] Disable DB copy automatic activation & Move any active DB copies to other DAG members" `
+						       -PercentComplete ($i/$($TotalStep) * 100) -Id 0
+			    ### Save mounted DB copies stats before moving ###
+			    $dbMountedCount = (Get-MailboxDatabaseCopyStatus -Server $Server | Where-Object { $_.Status -eq "Mounted" } | Measure-Object -Property Name -Line).Lines
 			
-			Set-MailboxServer $Server -DatabaseCopyActivationDisabledAndMoveNow:$true -Confirm:$false
-			Set-MailboxServer $Server -DatabaseCopyAutoActivationPolicy Blocked -Confirm:$false
+			    Set-MailboxServer $Server -DatabaseCopyActivationDisabledAndMoveNow:$true -Confirm:$false
+			    Set-MailboxServer $Server -DatabaseCopyAutoActivationPolicy Blocked -Confirm:$false
 
-            ## Simply dismount databases who are not in a DAG
-            get-mailboxdatabase -Server $Server|? {$_.ReplicationType -eq "None"}|Dismount-Database -Confirm:$False
+			    ### Wait for any database copies that are still mounted on the server ###
+			    If ($dbMountedCount) {
+
+                    ## Simply dismount databases who are not in a DAG
+                    get-mailboxdatabase -Server $Server|? {$_.ReplicationType -eq "None"}|Dismount-Database -Confirm:$False
 			
-			### Wait for any database copies that are still mounted on the server ###
-			If ($dbMountedCount) {
-                Write-Verbose "Waiting for any database copies that are still mounted on the server ..." -Verbose:$true
-			    do
-			    {
-				    $dbMounted = Get-MailboxDatabaseCopyStatus -Server $Server | Where-Object { $_.Status -eq "Mounted" }
-				    $dbMounted | Select-Object Name, DatabaseName, Status, CopyQueueLength | Sort-Object DatabaseName
-				    $dbMounteNow = ($dbMounted | Measure-Object -Property Name -Line).Lines -replace '^$', '0'
-				    Write-Progress -Activity "Waiting for [Step $i]" `
-							       -Status "Moving $($dbMountedCount) DB copies to other DAG members ..." `
-							       -CurrentOperation "Currently mounted: $($dbMounteNow) DB copies" `
-							       -PercentComplete ($($dbMountedCount - [int]$dbMounteNow)/$($dbMountedCount) * 100) -Id 2
-				    Start-Sleep -Seconds 30
-			    }
-			    while ($dbMounted)
-			    Write-Progress -Activity "Completed" -Completed -Id 2
-            }
+                    Write-Verbose "Waiting for any database copies that are still mounted on the server ..." -Verbose:$true
+			        do
+			        {
+				        $dbMounted = Get-MailboxDatabaseCopyStatus -Server $Server | Where-Object { $_.Status -eq "Mounted" }
+				        $dbMounted | Select-Object Name, DatabaseName, Status, CopyQueueLength | Sort-Object DatabaseName
+				        $dbMounteNow = ($dbMounted | Measure-Object -Property Name -Line).Lines -replace '^$', '0'
+				        Write-Progress -Activity "Waiting for [Step $i]" `
+							           -Status "Moving $($dbMountedCount) DB copies to other DAG members ..." `
+							           -CurrentOperation "Currently mounted: $($dbMounteNow) DB copies" `
+							           -PercentComplete ($($dbMountedCount - [int]$dbMounteNow)/$($dbMountedCount) * 100) -Id 2
+				        Start-Sleep -Seconds 30
+			        }
+			        while ($dbMounted)
+			        Write-Progress -Activity "Completed" -Completed -Id 2
+                }
+		    }
 		}
-		
-		### Put the server into Maintenance ###
+
+		### Set Server component states to ServerWideOffline ###
 		$i++
 		if ($PSCmdlet.ShouldProcess("Server [$($Server)]", "[Step $i of $TotalStep] Set Server component states to ServerWideOffline"))
 		{
 			Write-Progress -Activity "$($FunctionName)" `
 						   -Status "Exchange server: $($Server)" `
-						   -CurrentOperation "Current operation: [Step $i of $TotalStep] Put the server into Maintenance" `
+						   -CurrentOperation "Current operation: [Step $i of $TotalStep] Set Server component states to ServerWideOffline" `
 						   -PercentComplete ($i/$($TotalStep) * 100) -Id 0
 			Set-ServerComponentState $Server -Component ServerWideOffline -State Inactive -Requester Maintenance -Confirm:$false
 		}
