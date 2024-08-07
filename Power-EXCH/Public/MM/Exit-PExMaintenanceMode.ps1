@@ -1,4 +1,4 @@
-﻿Function Exit-PExMaintenanceMode
+Function Exit-PExMaintenanceMode
 {
 	
 <#
@@ -17,6 +17,7 @@
 	Version 1.0 :: 26-Dec-2021  :: [Release] :: Beta
 	Version 1.1 :: 03-Aug-2022  :: [Improve] :: Progress bar and steps counter, Parameter free function, Disk status check
     Version 1.2 :: 27-Jun-2024  :: [Improve] :: Add ability to run from admin workstation -CoadMonkey
+    Version 1.3 :: 27-Jun-2024  :: [Improve] :: Small verbage update -CoadMonkey
 .LINK
 	https://ps1code.com/2024/02/05/pexmm/
 #>
@@ -132,11 +133,11 @@
 		
 		### Take the server out of Maintenance Mode ###
 		$i++
-		if ($PSCmdlet.ShouldProcess("Server [$($Server)]", "[Step $i of $TotalStep] Take the server out of Maintenance Mode"))
+		if ($PSCmdlet.ShouldProcess("Server [$($Server)]", "[Step $i of $TotalStep] Set the Hub Transport service to Active"))
 		{
 			Write-Progress -Activity "$($FunctionName)" `
 						   -Status "Exchange server: $($Server)" `
-						   -CurrentOperation "Current operation: [Step $i of $TotalStep] Take the server out of Maintenance Mode" `
+						   -CurrentOperation "Current operation: [Step $i of $TotalStep] Set the Hub Transport service to Active" `
 						   -PercentComplete ($i/$($TotalStep) * 100)
 			Set-ServerComponentState $Server -Component HubTransport -State Active -Requester Maintenance -Confirm:$false
 		}
@@ -153,7 +154,7 @@
 							   -Status "Exchange server: $($Server)" `
 							   -CurrentOperation "Current operation: [Step $i of $TotalStep] Rebalance the DAG [$($DAG)] databases" `
 							   -PercentComplete ($i/$($TotalStep) * 100)
-				Start-Sleep -Seconds 300
+				Start-Sleep -Seconds 30
 				& "$($exscripts)\RedistributeActiveDatabases.ps1" -DagName $DAG -BalanceDbsByActivationPreference -SkipMoveSuppressionChecks -Confirm:$false -ErrorAction SilentlyContinue
 			}
 		}
