@@ -25,9 +25,8 @@ Function Set-PExMaintenanceMode
     Version 1.6 :: 27-Jun-2024  :: [Improve] :: Add ability to run from admin workstation
                                 :: [Bugfix]  :: Divide by 0 error if no mounted databases -CoadMonkey
     Version 1.7 :: 5-Jul-2024   :: [Bugfix]  :: Queue redirect not filtering out ShadowRedundancy queues -CoadMonkey
-    Version 1.8 :: 7-Aug-2024   :: [Bugfix]  :: Infinite loop waiting for databases when a non-DAG database exists
-                                :: [Bugfix]  :: Errors when Server is not a DAG member -CoadMonkey
-                                :: [Improve] :: Reroute messages starting with same AD Site -CoadMonkey
+    Version 1.8 :: 8-Aug-2024   :: [Bugfix]  :: Infinite loop and other errors non-DAG databases exist -CoadMonkey
+                                :: [Improve] :: Reroute messages using AD Sites instead of DAG members -CoadMonkey
 
 .LINK
 	https://ps1code.com/2024/02/05/pexmm/
@@ -181,14 +180,14 @@ Function Set-PExMaintenanceMode
 			        }
 			        else
 			        {
-				        Write-Verbose "The transport queue is empty" -Verbose:$true
+				        Write-Verbose "[Step $i of $TotalStep]. The transport queue is empty." -Verbose:$true
 			        }
 		        }
             }
         }
         Else
         {
-            Write-Verbose "Skipping [Step $i of $TotalStep]. The transport queue is empty" -Verbose:$true
+            Write-Verbose "[Step $i of $TotalStep]. The transport queue is empty." -Verbose:$true
         }
 
 		### Suspend Server from the DAG ###
