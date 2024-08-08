@@ -17,7 +17,8 @@ Function Exit-PExMaintenanceMode
 	Version 1.0 :: 26-Dec-2021  :: [Release] :: Beta
 	Version 1.1 :: 03-Aug-2022  :: [Improve] :: Progress bar and steps counter, Parameter free function, Disk status check
     Version 1.2 :: 27-Jun-2024  :: [Improve] :: Add ability to run from admin workstation -CoadMonkey
-    Version 1.3 :: 27-Jun-2024  :: [Improve] :: Small verbage update -CoadMonkey
+    Version 1.3 :: 08-Aug-2024  :: [Improve] :: Verbage updates -CoadMonkey
+                                :: [Bugfix]  :: Errors if there are non-DAG databases -CoadMonkey
 .LINK
 	https://ps1code.com/2024/02/05/pexmm/
 #>
@@ -39,15 +40,20 @@ Function Exit-PExMaintenanceMode
         }
         $RunLocal = $False
         If ($env:COMPUTERNAME -eq $Server) { $RunLocal = $True }
-        If ($RunLocal) {
-            $DAG = (Get-Cluster).Name
+        $MailboxServer = Get-MailboxServer -Identity $Server
+        If ( $MailboxServer.DatabaseAvailabilityGroup -eq $null ) {    # If Server is not a DAG member
+            $TotalStep = 3
         } Else {
-            $DAG = Invoke-Command -ComputerName $Server -ScriptBlock {
-                (Get-Cluster).Name
+            If ($RunLocal) {
+                $DAG = (Get-Cluster).Name
+            } Else {
+                $DAG = Invoke-Command -ComputerName $Server -ScriptBlock {
+                    (Get-Cluster).Name
+                }
             }
-        }
+            $TotalStep = 6
+        }        
 		$i = 0
-		$TotalStep = 6
 		$WarningPreference = 'SilentlyContinue'
 	}
 	Process
@@ -86,54 +92,59 @@ Function Exit-PExMaintenanceMode
 		}
 		
 		### Resume DAG Cluster Node ###
-		$i++
-        If ($RunLocal) {
-            $ClusterNode = (Get-ClusterNode -Name $Server).State -eq 'Paused'
-        } Else {
-            $ClusterNode = Invoke-Command -ComputerName $Server -ScriptBlock {
-                (Get-ClusterNode -Name $Using:Server).State -eq 'Paused'
-            }
-        }
-		if ($ClusterNode)
-		{
-			if ($PSCmdlet.ShouldProcess("Server [$($Server)]", "[Step $i of $TotalStep] Resume DAG Cluster Node"))
-			{
-				Write-Progress -Activity "$($FunctionName)" `
-							   -Status "Exchange server: $($Server)" `
-							   -CurrentOperation "Current operation: [Step $i of $TotalStep] Resume DAG Cluster Node" `
-							   -PercentComplete ($i/$($TotalStep) * 100)
-                If ($RunLocal) {
-                    Resume-ClusterNode -Name $Server | Out-Null
-                } Else {
-                    Invoke-Command -ComputerName $Server -ScriptBlock {
-                        Resume-ClusterNode -Name $Using:Server | Out-Null
-                    }
+        If ( $MailboxServer.DatabaseAvailabilityGroup -ne $null ) {    # Skip if Server is not a DAG member
+		    $i++
+            If ($RunLocal) {
+                $ClusterNode = (Get-ClusterNode -Name $Server).State -eq 'Paused'
+            } Else {
+                $ClusterNode = Invoke-Command -ComputerName $Server -ScriptBlock {
+                    (Get-ClusterNode -Name $Using:Server).State -eq 'Paused'
                 }
-			}
-		}
-        If ($RunLocal) {
-            Get-ClusterNode | Select-Object Name, Cluster, ID, State -Unique | Format-Table -AutoSize
-        } Else {
-            Invoke-Command -ComputerName $Server -ScriptBlock {
-                Get-ClusterNode | Select-Object Name, Cluster, ID, State -Unique | Format-Table -AutoSize
             }
-        }
-		
-		### Enable DB copy automatic activation ###
-		$i++
-		if ($PSCmdlet.ShouldProcess("Server [$($Server)]", "[Step $i of $TotalStep] Enable DB copy automatic activation"))
-		{
-			Write-Progress -Activity "$($FunctionName)" `
-						   -Status "Exchange server: $($Server)" `
-						   -CurrentOperation "Current operation: [Step $i of $TotalStep] Enable DB copy automatic activation" `
-						   -PercentComplete ($i/$($TotalStep) * 100)
-			Set-MailboxServer $Server -DatabaseCopyAutoActivationPolicy Unrestricted -Confirm:$false
-			Set-MailboxServer $Server -DatabaseCopyActivationDisabledAndMoveNow:$false -Confirm:$false
+		    if ($ClusterNode)
+		    {
+			    if ($PSCmdlet.ShouldProcess("Server [$($Server)]", "[Step $i of $TotalStep] Resume DAG Cluster Node"))
+			    {
+				    Write-Progress -Activity "$($FunctionName)" `
+							       -Status "Exchange server: $($Server)" `
+							       -CurrentOperation "Current operation: [Step $i of $TotalStep] Resume DAG Cluster Node" `
+							       -PercentComplete ($i/$($TotalStep) * 100)
+                    If ($RunLocal) {
+                        Resume-ClusterNode -Name $Server | Out-Null
+                    } Else {
+                        Invoke-Command -ComputerName $Server -ScriptBlock {
+                            Resume-ClusterNode -Name $Using:Server | Out-Null
+                        }
+                    }
+			    }
+		    }
+            sleep 10
+            If ($RunLocal) {
+                Get-ClusterNode | Select-Object Name, Cluster, ID, State -Unique | Format-Table -AutoSize
+            } Else {
+                Invoke-Command -ComputerName $Server -ScriptBlock {
+                    Get-ClusterNode | Select-Object Name, Cluster, ID, State -Unique | Format-Table -AutoSize
+                }
+            }
 		}
-		
-		### Take the server out of Maintenance Mode ###
+
+		### Enable DB copy automatic activation ###
+        If ( $MailboxServer.DatabaseAvailabilityGroup -ne $null ) {    # Skip if Server is not a DAG member
+		    $i++
+		    if ($PSCmdlet.ShouldProcess("Server [$($Server)]", "[Step $i of $TotalStep] Enable DB copy automatic activation"))
+		    {
+			    Write-Progress -Activity "$($FunctionName)" `
+						       -Status "Exchange server: $($Server)" `
+						       -CurrentOperation "Current operation: [Step $i of $TotalStep] Enable DB copy automatic activation" `
+						       -PercentComplete ($i/$($TotalStep) * 100)
+			    Set-MailboxServer $Server -DatabaseCopyAutoActivationPolicy Unrestricted -Confirm:$false
+			    Set-MailboxServer $Server -DatabaseCopyActivationDisabledAndMoveNow:$false -Confirm:$false
+		    }
+		}
+
+		### Reactivate HubTransport ###
 		$i++
-		if ($PSCmdlet.ShouldProcess("Server [$($Server)]", "[Step $i of $TotalStep] Set the Hub Transport service to Active"))
+		if ($PSCmdlet.ShouldProcess("Server [$($Server)]", "[Step $i of $TotalStep] Reactivate HubTransport"))
 		{
 			Write-Progress -Activity "$($FunctionName)" `
 						   -Status "Exchange server: $($Server)" `
@@ -143,31 +154,35 @@ Function Exit-PExMaintenanceMode
 		}
 		
 		### Rebalance DAG, this will return your active DB copies to their most preferred DAG member ###
-		$i++
-		$ServerStatusAfter = Get-PExMaintenanceMode -Server $Server
-		if ($ServerStatusAfter.State -eq 'Connected')
-		{
-			$ServerStatusAfter
-			if ($PSCmdlet.ShouldProcess("DAG [$($DAG)]", "[Step $i of $TotalStep] Rebalance the DAG databases"))
-			{
-				Write-Progress -Activity "$($FunctionName)" `
-							   -Status "Exchange server: $($Server)" `
-							   -CurrentOperation "Current operation: [Step $i of $TotalStep] Rebalance the DAG [$($DAG)] databases" `
-							   -PercentComplete ($i/$($TotalStep) * 100)
-				Start-Sleep -Seconds 30
-				& "$($exscripts)\RedistributeActiveDatabases.ps1" -DagName $DAG -BalanceDbsByActivationPreference -SkipMoveSuppressionChecks -Confirm:$false -ErrorAction SilentlyContinue
-			}
-		}
+        If ( $MailboxServer.DatabaseAvailabilityGroup -ne $null ) {    # Skip if Server is not a DAG member
+		    $i++
+		    $ServerStatusAfter = Get-PExMaintenanceMode -Server $Server
+		    if ($ServerStatusAfter.State -eq 'Connected')
+		    {
+			    $ServerStatusAfter
+			    if ($PSCmdlet.ShouldProcess("DAG [$($DAG)]", "[Step $i of $TotalStep] Rebalance the DAG databases"))
+			    {
+				    Write-Progress -Activity "$($FunctionName)" `
+							       -Status "Exchange server: $($Server)" `
+							       -CurrentOperation "Current operation: [Step $i of $TotalStep] Rebalance the DAG [$($DAG)] databases" `
+							       -PercentComplete ($i/$($TotalStep) * 100)
+				    Start-Sleep -Seconds 20
+				    
+                    If (Get-ChildItem "$($exscripts)\RedistributeActiveDatabases.ps1" -ErrorAction SilentlyContinue) {
+                        & "$($exscripts)\RedistributeActiveDatabases.ps1" -DagName $DAG -BalanceDbsByActivationPreference -SkipMoveSuppressionChecks -Confirm:$false -ErrorAction SilentlyContinue
+                    }
+                    Move-ActiveMailboxDatabase -ActivatePreferredOnServer $Server
+			    }
+		    }
+        }
+        Else
+        {
+            ## Simply mount databases who are not in a DAG
+            Get-MailboxDatabase -Server $Server|Mount-Database
+        }
 	}
 	End
 	{
-        If ($RunLocal) {
-            Get-ClusterNode | Select-Object Name, Cluster, ID, State -Unique | Format-Table -AutoSize
-        } Else {
-            Invoke-Command -ComputerName $Server -ScriptBlock {
-                Get-ClusterNode | Select-Object Name, Cluster, ID, State -Unique | Format-Table -AutoSize
-            }
-        }
 		Write-Verbose "$FunctionName :: Finished at [$(Get-Date)]" -Verbose:$true
 	}	
 }
