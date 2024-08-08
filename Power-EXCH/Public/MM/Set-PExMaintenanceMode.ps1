@@ -25,7 +25,7 @@ Function Set-PExMaintenanceMode
     Version 1.6 :: 27-Jun-2024  :: [Improve] :: Add ability to run from admin workstation
                                 :: [Bugfix]  :: Divide by 0 error if no mounted databases -CoadMonkey
     Version 1.7 :: 5-Jul-2024   :: [Bugfix]  :: Queue redirect not filtering out ShadowRedundancy queues -CoadMonkey
-    Version 1.8 :: 8-Aug-2024   :: [Bugfix]  :: Infinite loop and other errors non-DAG databases exist -CoadMonkey
+    Version 1.8 :: 8-Aug-2024   :: [Bugfix]  :: Infinite loop and other errors if there are non-DAG databases -CoadMonkey
                                 :: [Improve] :: Reroute messages using AD Sites instead of DAG members -CoadMonkey
 
 .LINK
@@ -225,6 +225,7 @@ Function Set-PExMaintenanceMode
 			
 			    Set-MailboxServer $Server -DatabaseCopyActivationDisabledAndMoveNow:$true -Confirm:$false
 			    Set-MailboxServer $Server -DatabaseCopyAutoActivationPolicy Blocked -Confirm:$false
+                Move-ActiveMailboxDatabase -Server $Server
 
 			    ### Wait for any database copies that are still mounted on the server ###
 			    If ($dbMountedCount) {
@@ -242,13 +243,16 @@ Function Set-PExMaintenanceMode
 							           -Status "Moving $($dbMountedCount) DB copies to other DAG members ..." `
 							           -CurrentOperation "Currently mounted: $($dbMounteNow) DB copies" `
 							           -PercentComplete ($($dbMountedCount - [int]$dbMounteNow)/$($dbMountedCount) * 100) -Id 2
-				        Start-Sleep -Seconds 30
+				        Start-Sleep -Seconds 20
 			        }
 			        while ($dbMounted)
 			        Write-Progress -Activity "Completed" -Completed -Id 2
                 }
 		    }
-		}
+		} Else {
+            ## Simply dismount databases who are not in a DAG
+            get-mailboxdatabase -Server $Server|? {$_.ReplicationType -eq "None"}|Dismount-Database -Confirm:$False
+        }			
 
 		### Set Server component states to ServerWideOffline ###
 		$i++
