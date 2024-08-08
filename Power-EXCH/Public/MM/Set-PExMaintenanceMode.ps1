@@ -27,6 +27,7 @@ Function Set-PExMaintenanceMode
     Version 1.7 :: 5-Jul-2024   :: [Bugfix]  :: Queue redirect not filtering out ShadowRedundancy queues -CoadMonkey
     Version 1.8 :: 7-Aug-2024   :: [Bugfix]  :: Infinite loop waiting for databases when a non-DAG database exists
                                 :: [Bugfix]  :: Errors when Server is not a DAG member -CoadMonkey
+                                :: [Improve] :: Reroute messages starting with same AD Site -CoadMonkey
 
 .LINK
 	https://ps1code.com/2024/02/05/pexmm/
@@ -44,7 +45,8 @@ Function Set-PExMaintenanceMode
 	{
 		$FunctionName = '{0}' -f $MyInvocation.MyCommand
 		Write-Verbose "$FunctionName :: Started at [$(Get-Date)]" -Verbose:$true
-        If ($Server -notin (Get-ExchangeServer).name) {
+        $ExchangeServers = Get-ExchangeServer
+        If ($Server -notin ($ExchangeServers).name) {
             throw "$Server is not an Exchange server. Use -Server to specify a different name."
         }
         $RunLocal = $False
@@ -63,7 +65,8 @@ Function Set-PExMaintenanceMode
 	}
 	Process
 	{
-		### Warn about in-progress mailbox migrations ###
+
+        ### Warn about in-progress mailbox migrations ###
 		if ($InProgressReq = Get-MoveRequest | Get-MoveRequestStatistics | Where-Object { $_.Status.Value -eq 'InProgress' -and $_.SourceServer, $_.TargetServer -contains $Fqdn })
 		{
 			$CountReq = ($InProgressReq | Measure-Object -Line -Property DisplayName).Lines
@@ -99,66 +102,95 @@ Function Set-PExMaintenanceMode
 			Set-ServerComponentState -Identity $Server -Component HubTransport -State Draining -Requester Maintenance -Confirm:$false
 		}
 		
-		### Redirect any queued messages to another DAG member ###
+
+		### Redirect any queued messages to another server (try same site first) ###
 		$i++
-        If ( $MailboxServer.DatabaseAvailabilityGroup -ne $null ) {    # Skip if Server is not a DAG member
-            If ($RunLocal) {
-       		    $TargetHostname = Get-ClusterNode | Where-Object { $_.Name -ne $Server -and $_.State -eq 'Up' } | Sort-Object { Get-Random } | Select-Object -First 1
-            } Else {
-                $TargetHostname = Invoke-Command -ComputerName $Server -ScriptBlock {
-                    Get-ClusterNode | Where-Object { $_.Name -ne $Using:Server -and $_.State -eq 'Up' } | Sort-Object { Get-Random } | Select-Object -First 1
-                }
+
+        # Can we skip this step?
+        if ((Get-Queue -Server $Server | Measure-Object -Property MessageCount -Sum).Sum)
+        {
+
+            # Build a list of servers trying same AD site first
+            [array]$ADSites = ($ExchangeServers | Where-Object { $_.name -eq $Server }).Site
+            $ADSites += ($ExchangeServers).Site |Where-Object {$_ -ne $ADSites[0]}| Select-Object -Unique
+            $EligibleServers = @()
+            foreach ($Site in $ADSites )
+            {
+                $EligibleServers += $ExchangeServers | Where-Object { $_.site -eq $Site -and $_.Name -ne $Server } |
+                    Sort-Object { Get-Random }
             }
-        } Else {
-            $TargetHostname = (Get-ExchangeServer | Where-Object { $_.Name -ne $Server } | Sort-Object { Get-Random } | Select-Object -First 1).name
+
+            if ($PSCmdlet.ShouldProcess("Server [$($Server)]", "[Step $i of $TotalStep] Redirect messages queue"))
+		    {
+
+                Write-Progress -Activity "$($FunctionName)" `
+				    -Status "Exchange server: $($Server)" `
+				    -CurrentOperation "Current operation: [Step $i of $TotalStep] Redirect messages" `
+				    -PercentComplete ($i/$($TotalStep) * 100) -Id 0
+
+                # Pick an eligible server not in maintentance mode.
+                Foreach ( $TargetHostname in $EligibleServers.name )
+                {
+                    Write-Verbose "Checking $TargetHostname for maintenance mode..."
+				    Write-Progress -Activity "Waiting for [Step $i]" `
+								    -Status "Checking $TargetHostname eligibility..." `
+								    -PercentComplete ($EligibleServers.IndexOf($TargetHostname)/$EligibleServers.count * 100) -Id 1
+                    $TargetServerStatus = Get-PExMaintenanceMode -Server $TargetHostname
+       		        if ($TargetServerStatus.State -notcontains 'Maintenance') { Break }
+                }
+                Write-Progress -Activity "Completed" -Completed -Id 1
+
+       		    if ($TargetServerStatus.State -contains 'Maintenance')
+                {
+                    Write-Error "Skipping [Step $i of $TotalStep]. There are no eligible servers for queue redirection!"
+                    $Skip = $true
+                }
+
+                If (!($skip))
+		        {
+                    $TargetFqdn = "$($TargetHostname).$($Domain)"
+	
+    		        Write-Progress -Activity "$($FunctionName)" `
+							        -Status "Exchange server: $($Server)" `
+							        -CurrentOperation "Current operation: [Step $i of $TotalStep] Redirect messages queue to [$($TargetFqdn)]" `
+							        -PercentComplete ($i/$($TotalStep) * 100) -Id 0
+			        ### Save transport queue stats before redirecting messages ###
+			        $QueueLength = (Get-Queue -Server $Server | Measure-Object -Property MessageCount -Sum).Sum
+				
+			        if ($QueueLength)
+			        {
+	    		        Redirect-Message -Server $Server -Target $TargetFqdn -Confirm:$false
+    				
+				        ### Wait the transport queue would be empty or almost empty ###
+				        Write-Verbose "Waiting for the transport queue to empty below $QueueTolerance ..." -Verbose:$true
+				        do
+				        {
+					        $Queue = Get-Queue -Server $Server -ErrorAction SilentlyContinue|? {$_.DeliveryType -ne "ShadowRedundancy"}
+					        $Queue | Select-Object Identity, DeliveryType, Status, MessageCount
+					        $QueueLengthNow = ($Queue | Measure-Object -Property MessageCount -Sum).Sum
+					        $QueuePercent = if ($QueueLength -eq 0) { 1 }
+					            else { $($QueueLength - $QueueLengthNow)/$($QueueLength) }
+					        Write-Progress -Activity "Waiting for [Step $i]" `
+									        -Status "Moving $($QueueLengthNow) queued messages to other transport servers ..." `
+									        -CurrentOperation "Currently queued: $($QueueLengthNow) messages" `
+									        -PercentComplete ($QueuePercent * 100) -Id 1
+					        Start-Sleep -Seconds 20
+				        }
+				        while ($QueueLengthNow -gt $QueueTolerance)
+				        Write-Progress -Activity "Completed" -Completed -Id 1
+			        }
+			        else
+			        {
+				        Write-Verbose "The transport queue is empty" -Verbose:$true
+			        }
+		        }
+            }
         }
-		$TargetFqdn = "$($TargetHostname).$($Domain)"
-		$ServerStatus = Get-PExMaintenanceMode -Server $Server
-		$TargetServerStatus = Get-PExMaintenanceMode -Server $TargetHostname
-		if (@($ServerStatus.State, $TargetServerStatus.State) -notcontains 'Maintenance')
-		{
-			if ($PSCmdlet.ShouldProcess("Server [$($Server)]", "[Step $i of $TotalStep] Redirect messages queue to [$($TargetFqdn)]"))
-			{
-				Write-Progress -Activity "$($FunctionName)" `
-							   -Status "Exchange server: $($Server)" `
-							   -CurrentOperation "Current operation: [Step $i of $TotalStep] Redirect messages queue to [$($TargetFqdn)]" `
-							   -PercentComplete ($i/$($TotalStep) * 100) -Id 0
-				### Save transport queue stats before redirecting messages ###
-				$QueueLength = (Get-Queue -Server $Server | Measure-Object -Property MessageCount -Sum).Sum
-				
-				Redirect-Message -Server $Server -Target $TargetFqdn -Confirm:$false
-				
-				if ($QueueLength)
-				{
-					### Wait the transport queue would be empty or almost empty ###
-					Write-Verbose "Waiting for the transport queue to empty below $QueueTolerance ..." -Verbose:$true
-					do
-					{
-						$Queue = Get-Queue -Server $Server -ErrorAction SilentlyContinue|? {$_.DeliveryType -ne "ShadowRedundancy"}
-						$Queue | Select-Object Identity, DeliveryType, Status, MessageCount
-						$QueueLengthNow = ($Queue | Measure-Object -Property MessageCount -Sum).Sum
-						$QueuePercent = if ($QueueLength -eq 0) { 1 }
-						else { $($QueueLength - $QueueLengthNow)/$($QueueLength) }
-						Write-Progress -Activity "Waiting for [Step $i]" `
-									   -Status "Moving $($QueueLengthNow) queued messages to other transport servers ..." `
-									   -CurrentOperation "Currently queued: $($QueueLengthNow) messages" `
-									   -PercentComplete ($QueuePercent * 100) -Id 1
-						Start-Sleep -Seconds 30
-					}
-					while ($QueueLengthNow -gt $QueueTolerance)
-					Write-Progress -Activity "Completed" -Completed -Id 1
-				}
-				else
-				{
-					Write-Verbose "The transport queue is empty" -Verbose:$true
-				}
-			}
-		}
-		else
-		{
-			throw "Either source [$Server] or target [$TargetHostname] is already in Maintenance Mode!"
-		}
-		
+        Else
+        {
+            Write-Verbose "Skipping [Step $i of $TotalStep]. The transport queue is empty" -Verbose:$true
+        }
+
 		### Suspend Server from the DAG ###
         If ( $MailboxServer.DatabaseAvailabilityGroup -ne $null ) {    # Skip if Server is not a DAG member
 		    $i++
