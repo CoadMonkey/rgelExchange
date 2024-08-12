@@ -42,7 +42,7 @@ Function Exit-PExMaintenanceMode
         If ($env:COMPUTERNAME -eq $Server) { $RunLocal = $True }
         $MailboxServer = Get-MailboxServer -Identity $Server
         If ( $MailboxServer.DatabaseAvailabilityGroup -eq $null ) {    # If Server is not a DAG member
-            $TotalStep = 3
+            $TotalStep = 4
         } Else {
             If ($RunLocal) {
                 $DAG = (Get-Cluster).Name
@@ -129,17 +129,15 @@ Function Exit-PExMaintenanceMode
 		}
 
 		### Enable DB copy automatic activation ###
-        If ( $MailboxServer.DatabaseAvailabilityGroup -ne $null ) {    # Skip if Server is not a DAG member
-		    $i++
-		    if ($PSCmdlet.ShouldProcess("Server [$($Server)]", "[Step $i of $TotalStep] Enable DB copy automatic activation"))
-		    {
-			    Write-Progress -Activity "$($FunctionName)" `
-						       -Status "Exchange server: $($Server)" `
-						       -CurrentOperation "Current operation: [Step $i of $TotalStep] Enable DB copy automatic activation" `
-						       -PercentComplete ($i/$($TotalStep) * 100)
-			    Set-MailboxServer $Server -DatabaseCopyAutoActivationPolicy Unrestricted -Confirm:$false
-			    Set-MailboxServer $Server -DatabaseCopyActivationDisabledAndMoveNow:$false -Confirm:$false
-		    }
+		$i++
+		if ($PSCmdlet.ShouldProcess("Server [$($Server)]", "[Step $i of $TotalStep] Enable DB copy automatic activation"))
+		{
+			Write-Progress -Activity "$($FunctionName)" `
+						    -Status "Exchange server: $($Server)" `
+						    -CurrentOperation "Current operation: [Step $i of $TotalStep] Enable DB copy automatic activation" `
+						    -PercentComplete ($i/$($TotalStep) * 100)
+			Set-MailboxServer $Server -DatabaseCopyAutoActivationPolicy Unrestricted -Confirm:$false
+			Set-MailboxServer $Server -DatabaseCopyActivationDisabledAndMoveNow:$false -Confirm:$false
 		}
 
 		### Reactivate HubTransport ###
