@@ -176,15 +176,18 @@ Function Exit-PExMaintenanceMode
                 Set-MailboxServer $Server -DatabaseCopyAutoActivationPolicy Unrestricted -Confirm:$false
 			    Set-MailboxServer $Server -DatabaseCopyActivationDisabledAndMoveNow:$false -Confirm:$false
     		    $Count = 0
-                $DatabaseCopyAutoActivationPolicy = (Get-MailboxServer $Server).DatabaseCopyAutoActivationPolicy
+                Write-Verbose "Executing Get-MailboxServer"
 			    do
 			    {
-				    $Count++
+				    $Count += 2
+                    Write-Verbose "Executing Get-MailboxServer"
+                    $DatabaseCopyAutoActivationPolicy = (Get-MailboxServer $Server).DatabaseCopyAutoActivationPolicy
+                    Write-Verbose "Waiting for DatabaseCopyAutoActivationPolicy ..."
                     Write-Progress -Activity "Waiting for [Step $i]" `
-								    -Status "Waiting for DatabaseCopyAutoActivationPolicy..." `
+								    -Status "Waiting for DatabaseCopyAutoActivationPolicy ..." `
 								    -CurrentOperation "DatabaseCopyAutoActivationPolicy = $DatabaseCopyAutoActivationPolicy" `
 								    -PercentComplete ($Count) -Id 1
-                    $DatabaseCopyAutoActivationPolicy = (Get-MailboxServer $Server).DatabaseCopyAutoActivationPolicy
+                    Write-Verbose "Start-Sleep -Seconds 5"
 				    Start-Sleep -Seconds 1
 			    }
 			    while ($DatabaseCopyAutoActivationPolicy -ne "Unrestricted" -and $Count -lt 100)
