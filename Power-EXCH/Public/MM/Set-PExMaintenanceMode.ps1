@@ -1,4 +1,4 @@
-Function Set-PExMaintenanceMode
+﻿Function Set-PExMaintenanceMode
 {
 	
 <#
@@ -25,9 +25,9 @@ Function Set-PExMaintenanceMode
     Version 1.6 :: 27-Jun-2024  :: [Improve] :: Add ability to run from admin workstation
                                 :: [Bugfix]  :: Divide by 0 error if no mounted databases -CoadMonkey
     Version 1.7 :: 5-Jul-2024   :: [Bugfix]  :: Queue redirect not filtering out ShadowRedundancy queues -CoadMonkey
-    Version 1.8 :: 19-Aug-2024  :: [Bugfix]  :: Infinite loop and other errors if there are non-DAG databases -CoadMonkey
+    Version 1.8 :: 21-Aug-2024  :: [Bugfix]  :: Infinite loop and other errors if there are non-DAG databases -CoadMonkey
                                 :: [Improve] :: Reroute messages using AD Sites instead of DAG members. Add more messages.
-                                                Add more wait loops. -CoadMonkey
+                                                Add more process verifications. -CoadMonkey
 
 .LINK
 	https://ps1code.com/2024/02/05/pexmm/
@@ -48,7 +48,6 @@ Function Set-PExMaintenanceMode
         Write-Verbose "Executing Get-ExchangeServer"
         $ExchangeServers = Get-ExchangeServer
         If ($Server -notin ($ExchangeServers).name) {
-            Write-Error "$Server is not an Exchange server. Use -Server to specify a different name."
             throw "$Server is not an Exchange server. Use -Server to specify a different name."
         }
         $RunLocal = $False
@@ -61,7 +60,6 @@ Function Set-PExMaintenanceMode
         } Else {
             $TotalStep = 6
         }        
-		$WarningPreference = 'SilentlyContinue'
 		$Domain = [System.DirectoryServices.ActiveDirectory.Domain]::GetCurrentDomain().Name
 		$Fqdn = ([System.Net.Dns]::GetHostByName($env:COMPUTERNAME)).HostName
 	}
@@ -102,7 +100,7 @@ Function Set-PExMaintenanceMode
 		$i++
 		Write-Progress -Activity "$($FunctionName)" `
 						-Status "Exchange server: $($Server)" `
-						-CurrentOperation "Current operation: [Step $i of $TotalStep] Set the Hub Transport service to draining" `
+						-CurrentOperation "Current operation: [Step $i of $TotalStep] Set Hub Transport service to draining" `
 						-PercentComplete ($i/$($TotalStep) * 100) -Id 0
         Write-Verbose "Executing Get-ServerComponentState"
         $HubTransportState = (Get-ServerComponentState -Identity $Server -Component HubTransport).State
@@ -115,6 +113,10 @@ Function Set-PExMaintenanceMode
                 Set-ServerComponentState -Identity $Server -Component HubTransport -State Draining -Requester Maintenance -Confirm:$false
                 Write-Verbose "[Step $i of $TotalStep] Hub Transport service set to draining" -Verbose:$True
 		    }
+            Else
+            {
+                Write-Verbose "[Step $i of $TotalStep] Set Hub Transport service to draining Skipped by user"
+            }
         }
         Else
         {
@@ -128,26 +130,25 @@ Function Set-PExMaintenanceMode
 			-CurrentOperation "Current operation: [Step $i of $TotalStep] Redirect messages in queue" `
 			-PercentComplete ($i/$($TotalStep) * 100) -Id 0
 
-        # Can we skip this step?
+        # Skip if queue is already empty
         Write-Verbose "Executing Get-Queue"
         if ((Get-Queue -Server $Server | Measure-Object -Property MessageCount -Sum).Sum)
         {
 
-            # Build a list of servers trying same AD site first
-            [array]$ADSites = ($ExchangeServers | Where-Object { $_.name -eq $Server }).Site
-            $ADSites += ($ExchangeServers).Site |Where-Object {$_ -ne $ADSites[0]}| Select-Object -Unique
-            $EligibleServers = @()
-            foreach ($Site in $ADSites )
-            {
-                $EligibleServers += $ExchangeServers |
-                    Where-Object { $_.site -eq $Site -and $_.Name -ne $Server -and $_.name -notlike "*test*"} |
-                    Sort-Object { Get-Random }
-            }
-            Write-Verbose "Eligible Servers: $EligibleServers"
-
             if ($PSCmdlet.ShouldProcess("Server [$($Server)]", "[Step $i of $TotalStep] Redirect messages in queue"))
 		    {
 
+                # Build a list of servers trying same AD site first
+                [array]$ADSites = ($ExchangeServers | Where-Object { $_.name -eq $Server }).Site
+                $ADSites += ($ExchangeServers).Site |Where-Object {$_ -ne $ADSites[0]}| Select-Object -Unique
+                $EligibleServers = @()
+                foreach ($Site in $ADSites )
+                {
+                    $EligibleServers += $ExchangeServers |
+                        Where-Object { $_.site -eq $Site -and $_.Name -ne $Server -and $_.name -notlike "*test*"} |
+                        Sort-Object { Get-Random }
+                }
+                Write-Verbose "Eligible Servers: $EligibleServers"
 
                 # Pick an eligible server not in maintentance mode.
                 Foreach ( $TargetHostname in $EligibleServers.name )
@@ -166,7 +167,6 @@ Function Set-PExMaintenanceMode
                 {
                     Write-Verbose "Executing Get-Queue"
                     Get-Queue -Server $Server -ErrorAction SilentlyContinue|? {$_.DeliveryType -ne "ShadowRedundancy"} | Select-Object Identity, DeliveryType, Status, MessageCount
-                    Write-Error "[Step $i of $TotalStep] There are no eligible servers for queue redirection! Wait for queue to empty and then re-try"
                     throw "[Step $i of $TotalStep] There are no eligible servers for queue redirection! Wait for queue to empty and then re-try"
                 }
 
@@ -179,42 +179,40 @@ Function Set-PExMaintenanceMode
 							    -PercentComplete ($i/$($TotalStep) * 100) -Id 0
 			    
                 ### Save transport queue stats before redirecting messages ###
-                Write-Verbose "Executing Get-Queue"
-                $QueueLength = (Get-Queue -Server $Server | Measure-Object -Property MessageCount -Sum).Sum
+	    		Write-Verbose "Executing Redirect-Message"
+                Redirect-Message -Server $Server -Target $TargetFqdn -Confirm:$false
 				
-			    if ($QueueLength)
-			    {
-	    		    Write-Verbose "Executing Redirect-Message"
-                    Redirect-Message -Server $Server -Target $TargetFqdn -Confirm:$false
-    				
-				    ### Wait the transport queue to empty ###
-				    Write-Verbose "Waiting for the transport queue to empty ..."
-                    $Count = 0
-				    do
-				    {
-					    $Count += 2
-                        Write-Verbose "Executing Get-Queue"
-                        $Queue = Get-Queue -Server $Server -ErrorAction SilentlyContinue #|? {$_.DeliveryType -ne "ShadowRedundancy"}
-					    #$Queue | Select-Object Identity, DeliveryType, Status, MessageCount
-					    $QueueLengthNow = ($Queue | Measure-Object -Property MessageCount -Sum).Sum
-					    $QueuePercent = $($QueueLength - $QueueLengthNow)/$($QueueLength)
-                        Write-Verbose "QueueLengthNow: $QueueLengthNow"
-                        Write-Verbose "QueuePercent: $QueuePercent"
-					    Write-Progress -Activity "Waiting for [Step $i]" `
-									    -Status "Moving $($QueueLengthNow) queued messages to other transport servers ..." `
-									    -CurrentOperation "Currently queued: $($QueueLengthNow) messages" `
-									    -PercentComplete ($QueuePercent * 100) -Id 1
-					    Start-Sleep -Seconds 1
-				    }
-				    while ($QueueLengthNow -gt 0 -and $Count -lt 100 )
-				    Write-Progress -Activity "Completed" -Completed -Id 1
-                    If ($Count -ge 100)
-                    {
-                        Write-Warning "[Step $i of $TotalStep] Timeout waiting for queue to empty. There are $($QueueLengthNow) message outstanding. Please wait and try again." -Verbose:$True
-                    }
-			    }
+				Write-Verbose "Waiting for the transport queue to empty ..."
+                $Count = 0
+				do
+				{
+					$Count += 2
+                    Write-Verbose "Executing Get-Queue"
+                    $QueueLength = (Get-Queue -Server $Server -ErrorAction SilentlyContinue| Measure-Object -Property MessageCount -Sum).Sum
+                    If (!($QueueLength)) { $QueueLength = 0 }
+					$QueuePercent = If ($QueueLength -gt 100) { 100 } Else { $QueueLength }
+                    Write-Verbose "QueueLength: $QueueLength"
+					Write-Progress -Activity "Waiting for [Step $i]" `
+									-Status "Moving queued messages to other transport servers ..." `
+									-CurrentOperation "Currently queued: $($QueueLength) messages" `
+									-PercentComplete ($QueuePercent) -Id 1
+					Start-Sleep -Seconds 1
+				}
+				while ($QueueLength -gt 0 -and $Count -lt 100 )
+				Write-Progress -Activity "Completed" -Completed -Id 1
+                If ($Count -ge 100)
+                {
+                    Write-Warning "[Step $i of $TotalStep] Timeout waiting for queue to empty. There are $($QueueLength) message outstanding. Please wait and try again." -Verbose:$True
+                }
+                Else
+                {
+                    Write-Verbose "[Step $i of $TotalStep] Queued messages are redirected to [$TargetFqdn]. The transport queue is empty." -Verbose:$True
+                }
             }
-            Write-Verbose "[Step $i of $TotalStep] Queued messages are redirected to [$TargetFqdn]. The transport queue is empty." -Verbose:$True
+            Else
+            {
+                Write-Verbose "[Step $i of $TotalStep] Redirect messages in queue skipped by user" -Verbose:$True
+            }
         }
         Else
         {
@@ -234,18 +232,28 @@ Function Set-PExMaintenanceMode
                 If ($RunLocal)
                 {
                     Suspend-ClusterNode $Server -Wait -Drain -Confirm:$false | Out-Null
-                    #Get-ClusterNode | Select-Object Name, Cluster, ID, State -Unique | Format-Table -AutoSize
+                    $ClusterNodeState = (Get-ClusterNode |? {$_.Name -eq $Using:Server}).State
                 }
                 Else
                 {
                     Invoke-Command -ComputerName $Server -ScriptBlock {
                         Suspend-ClusterNode $Using:Server -Wait -Drain -Confirm:$false | Out-Null
-                        #Get-ClusterNode | Select-Object Name, Cluster, ID, State -Unique | Format-Table -AutoSize
                     }
-                }    
-                Write-Verbose "Executing Get-ClusterNode"
+                    $ClusterNodeState = Invoke-Command -ComputerName $Server -ScriptBlock {
+                        (Get-ClusterNode |? {$_.Name -eq $Using:Server}).State
+                    }
+                    $ClusterNodeState = $ClusterNodeState.value
+                }   
+                If ($ClusterNodeState -ne "Up") { 
+                    Write-Verbose "[Step $i of $TotalStep] Suspended Server from Cluster node" -Verbose:$True
+                } Else {
+                    Write-Verbose "[Step $i of $TotalStep] Error occured suspending Server from Cluster node" -Verbose:$True
+                }
 		    }
-            Write-Verbose "[Step $i of $TotalStep] Server suspended from the DAG" -Verbose:$True
+            Else
+            {
+                Write-Verbose "[Step $i of $TotalStep] Suspend Server from Cluster node skipped by user" -Verbose:$True
+            }
         }
 
         ### Disable DB copy automatic activation and move any active DB copies to other DAG members ###
@@ -298,7 +306,7 @@ Function Set-PExMaintenanceMode
 		    }
             Else
             {
-                Write-Verbose "[Step $i of $TotalStep] Disable & Move DB(s) Skipped" -Verbose:$True
+                Write-Verbose "[Step $i of $TotalStep] Disable & Move DB(s) Skipped by user" -Verbose:$True
             }
         }
  
@@ -348,12 +356,12 @@ Function Set-PExMaintenanceMode
                 }
                 Else
                 {
-                    Write-Verbose "[Step $i of $TotalStep] Dismount databases Skipped" -Verbose:$True
+                    Write-Verbose "[Step $i of $TotalStep] Dismount databases skipped by user" -Verbose:$True
                 }
             }
             Else
             {
-                Write-Verbose "[Step $i of $TotalStep] There are no mounted databases" -Verbose:$True
+                Write-Verbose "[Step $i of $TotalStep] Dismount databases skipped. There are no mounted databases." -Verbose:$True
             }
         }
 
@@ -364,15 +372,11 @@ Function Set-PExMaintenanceMode
 						-CurrentOperation "Current operation: [Step $i of $TotalStep] Set Server component states to ServerWideOffline" `
 						-PercentComplete ($i/$($TotalStep) * 100) -Id 0
 
-        Write-Verbose "Executing Get-PExMaintenanceMode"
-        $ServerStatusAfter = Get-PExMaintenanceMode -Server $Server
-        If ($ServerStatusAfter.State -ne 'Maintenance')
-        {
-		    if ($PSCmdlet.ShouldProcess("Server [$($Server)]", "[Step $i of $TotalStep] Set Server component states to ServerWideOffline"))
-		    {
-			    Write-Verbose "Executing Set-ServerComponentState"
-                Set-ServerComponentState $Server -Component ServerWideOffline -State Inactive -Requester Maintenance -Confirm:$false
-		    }
+		if ($PSCmdlet.ShouldProcess("Server [$($Server)]", "[Step $i of $TotalStep] Set Server component states to ServerWideOffline"))
+		{
+			Write-Verbose "Executing Set-ServerComponentState"
+            Set-ServerComponentState $Server -Component ServerWideOffline -State Inactive -Requester Maintenance -Confirm:$false
+
             Write-Verbose "Waiting for component states to become Inactive on [$Server] ..."
             $Count = 0
 		    do
@@ -396,10 +400,10 @@ Function Set-PExMaintenanceMode
             {
                 Write-Verbose "[Step $i of $TotalStep] Server component states set to ServerWideOffline" -Verbose:$True
             }
-        }
+		}
         Else
         {
-            Write-Verbose "[Step $i of $TotalStep] Server component states are already Inactive" -Verbose:$True
+            Write-Verbose "[Step $i of $TotalStep] Set Server component states to ServerWideOffline skipped by user" -Verbose:$True
         }
         		
 		### Reboot/Shutdown the server ###
@@ -424,7 +428,7 @@ Function Set-PExMaintenanceMode
             }
             Else
             {
-                Write-Verbose "[Step $i of $TotalStep] Reboot / Shutdown Skipped" -Verbose:$True
+                Write-Verbose "[Step $i of $TotalStep] Reboot / Shutdown Skipped by user" -Verbose:$True
             }
 		}
 		Write-Progress -Activity "Completed" -Completed -Id 0

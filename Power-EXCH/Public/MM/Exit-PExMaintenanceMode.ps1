@@ -1,4 +1,4 @@
-Function Exit-PExMaintenanceMode
+﻿Function Exit-PExMaintenanceMode
 {
 	
 <#
@@ -187,7 +187,7 @@ Function Exit-PExMaintenanceMode
 								    -Status "Waiting for DatabaseCopyAutoActivationPolicy ..." `
 								    -CurrentOperation "DatabaseCopyAutoActivationPolicy = $DatabaseCopyAutoActivationPolicy" `
 								    -PercentComplete ($Count) -Id 1
-                    Write-Verbose "Start-Sleep -Seconds 5"
+                    Write-Verbose "Executing Start-Sleep"
 				    Start-Sleep -Seconds 1
 			    }
 			    while ($DatabaseCopyAutoActivationPolicy -ne "Unrestricted" -and $Count -lt 100)
