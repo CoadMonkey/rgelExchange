@@ -17,7 +17,7 @@
 	Version 1.0 :: 26-Dec-2021  :: [Release] :: Beta
 	Version 1.1 :: 03-Aug-2022  :: [Improve] :: Progress bar and steps counter, Parameter free function, Disk status check
     Version 1.2 :: 27-Jun-2024  :: [Improve] :: Add ability to run from admin workstation -CoadMonkey
-    Version 1.3 :: 19-Aug-2024  :: [Improve] :: Verbage updates, more verbose messages, additional checks. -CoadMonkey
+    Version 1.3 :: 21-Aug-2024  :: [Improve] :: Verbage updates, more verbose messages, additional checks. -CoadMonkey
                                 :: [Bugfix]  :: Errors if there are non-DAG databases -CoadMonkey
 .LINK
 	https://ps1code.com/2024/02/05/pexmm/
