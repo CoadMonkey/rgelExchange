@@ -28,6 +28,8 @@
     Version 1.8 :: 21-Aug-2024  :: [Bugfix]  :: Infinite loop and other errors if there are non-DAG databases -CoadMonkey
                                 :: [Improve] :: Reroute messages using AD Sites instead of DAG members. Add more messages.
                                                 Add more process verifications. -CoadMonkey
+    Version 1.9 :: 27-Sep-2024  :: [Bugfix]  :: Divide by 0 error in Write-Progress waiting for DBs to dismount -CoadMonkey
+
 
 .LINK
 	https://ps1code.com/2024/02/05/pexmm/
@@ -280,20 +282,23 @@
 			
 			    ### Wait for any database copies that are still mounted on the server ###
 			    Write-Verbose "Waiting for any database copies that are still mounted on the server ..."
-                $Count = 0
-			    do
-			    {
-				    $Count += 2
-                    Write-Verbose "Executing Get-MailboxDatabaseCopyStatus"
-                    $dbMounted = Get-MailboxDatabaseCopyStatus -Server $Server | Where-Object { $_.Status -eq "Mounted" }
-				    $dbMounteNow = ($dbMounted | Measure-Object -Property Name -Line).Lines -replace '^$', '0'
-				    Write-Progress -Activity "Waiting for [Step $i]" `
-							       -Status "Moving $($dbMountedCount) DB copies to other DAG members ..." `
-							       -CurrentOperation "Currently mounted: $($dbMounteNow) DB copies" `
-							       -PercentComplete ($($dbMountedCount - [int]$dbMounteNow)/$($dbMountedCount) * 100) -Id 1
-				    Start-Sleep -Seconds 1
-			    }
-			    while ($dbMounted -and $Count -lt 100)
+                If ($dbMountedCount -gt 0) {
+                    $Count = 0
+			        do
+			        {
+				        $Count += 2
+                        Write-Verbose "Executing Get-MailboxDatabaseCopyStatus"
+				        $dbMounteNow = (Get-MailboxDatabaseCopyStatus -Server $Server |
+                            Where-Object { $_.Status -eq "Mounted"} |
+                            Measure-Object -Property Name -Line).Lines -replace '^$', '0'
+				        Write-Progress -Activity "Waiting for [Step $i]" `
+							           -Status "Moving $($dbMountedCount) DB copies to other DAG members ..." `
+							           -CurrentOperation "Currently mounted: $($dbMounteNow) DB copies" `
+							           -PercentComplete ($($dbMountedCount - [int]$dbMounteNow)/$($dbMountedCount) * 100) -Id 1
+				        Start-Sleep -Seconds 1
+			        }
+			        while ($dbMounteNow -gt 0 -and $Count -lt 100)
+                }
 			    Write-Progress -Activity "Completed" -Completed -Id 1
                 If ($Count -ge 100)
                 {
