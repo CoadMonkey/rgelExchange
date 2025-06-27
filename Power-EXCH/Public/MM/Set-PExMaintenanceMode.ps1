@@ -29,6 +29,7 @@
                                 :: [Improve] :: Reroute messages using AD Sites instead of DAG members. Add more messages.
                                                 Add more process verifications. -CoadMonkey
     Version 1.9 :: 27-Sep-2024  :: [Bugfix]  :: Divide by 0 error in Write-Progress waiting for DBs to dismount -CoadMonkey
+    Version 1.10 :: 27-Jun-2025  :: [Improve]  :: Added pause to confirm reboot / shutdown.
 
 
 .LINK
@@ -421,6 +422,7 @@
 		{
             Write-Verbose "[Step $i of $TotalStep] Restarting $Server" -Verbose:$True
             Write-Verbose "Executing Restart-Computer"
+            Read-Host "Press enter to confirm RESTART of $Server"
 			Restart-Computer -ComputerName $Server -Force -Confirm:$false
 		}
 		else
@@ -429,6 +431,7 @@
 			{
                 Write-Verbose "[Step $i of $TotalStep] Shutting down $Server" -Verbose:$True
                 Write-Verbose "Executing Stop-Computer"
+                Read-Host "Press enter to confirm SHUTDOWN of $Server"
 				Stop-Computer -ComputerName $Server -Force -Confirm:$false
             }
             Else
