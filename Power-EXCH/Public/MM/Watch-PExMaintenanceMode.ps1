@@ -14,7 +14,7 @@
 	Author      :: @ps1code
 	Dependency  :: Function     :: Get-PExMaintenanceMode
     Version 1.0 :: 21-Aug-2024  :: [Release] :: Beta -CoadMonkey
-    Version 2.0 :: 29-Aug-2025  :: [Improvement] :: Improve output and streamline. Added configurable delay.
+    Version 2.0 :: 28-Aug-2025  :: [Improvement] :: Improve output and streamline. Added configurable delay.
 
 .LINK
 
