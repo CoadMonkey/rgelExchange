@@ -15,6 +15,7 @@
 	Dependency  :: Function     :: Get-PExMaintenanceMode
     Version 1.0 :: 21-Aug-2024  :: [Release] :: Beta -CoadMonkey
     Version 2.0 :: 28-Aug-2025  :: [Improvement] :: Improve output and streamline. Added configurable delay.
+    Version 2.1 :: 29-Aug-2025  :: [Improvement] :: Improve output by doing all processing first and combining output objects.
 
 .LINK
 
@@ -35,128 +36,126 @@
 	Begin
 	{
         $FunctionName = '{0}' -f $MyInvocation.MyCommand
+
 	}
 
 	Process
 	{
         While ($true) {
 
-    		Write-Verbose "$FunctionName :: Started at [$(Get-Date)] on $Server" -Verbose:$True
+    		Write-Verbose "$FunctionName :: Started at [$(Get-Date)]" -Verbose:$True
 
+            ### Gather server information ###
             Write-Verbose "Executing Get-ExchangeServer"
             $ExchangeServers = Get-ExchangeServer | sort Name
             If (!($ExchangeServers)) {
                 Write-Error "Unable to get Exchange Servers" -Verbose:$True
                 throw "Unable to get Exchange Servers"
             }
+            $RunLocal = $False
+            If ($env:COMPUTERNAME -in $ExchangeServers.name) { $RunLocal = $True }
 
 
-            ### Test Connection ###
-            Write-Verbose "Executing Test-Connection"
-            Write-Host -ForegroundColor Yellow "Ping Test"
+            ### Reset variables ###
             $Obj_Arr = @()
-            foreach ($Server in $ExchangeServers.name) {
+            Remove-Variable Object,Server,Online,HubTransport,Queue,MaintMode,ClusterNode -ErrorAction SilentlyContinue
+
+
+            ### Server Checks ###
+            foreach ($Server in $ExchangeServers.name)
+            {
+
+
+                ### Test Connection ###
+                Write-Verbose "Executing Test-Connection"
                 $Online = Test-Connection $Server -Count 1 -Quiet
+                
+
+                If ($Online)
+                {
+
+
+		            ### Hub Transport ###
+                    Write-Verbose "Executing Get-ServerComponentState"
+                    $HubTransport = (Get-ServerComponentState -Identity $Server -Component HubTransport).State
+
+        
+		            ### Queue totals ###
+                    Write-Verbose "Executing Get-Queue"
+                    $Queue = (Get-Queue -Server $Server | Measure-Object -Property MessageCount -Sum).Sum
+
+
+		            ### Cluster Nodes ###
+                    Write-Verbose "Executing Get-ClusterNode"
+                    If (!($ClusterNodeArray))
+                    {
+                        If ($RunLocal)
+                        {
+                            $ClusterNodeArray = Get-ClusterNode
+                        }
+                        Else
+                        {
+                            $ClusterNodeArray = Invoke-Command -ComputerName $Server -ScriptBlock {
+                                Get-ClusterNode
+                            }
+                        }   
+                    }
+                    $ClusterNode = ($ClusterNodeArray|Where-Object {$_.Name -eq $Server}).State
+
+
+		            ### Maintenance Mode ###
+                    Write-Verbose "Executing Get-PExMaintenanceMode"
+                    $MaintMode = (Get-PExMaintenanceMode $Server).State
+
+                }
+
+
+                ### Build Output object ###
+                Write-Verbose "Building output object"
                 $Object = New-Object Psobject -Property @{
                     Name = $Server
                     Online = $Online
+                    HubTransport = $HubTransport
+                    Queue = $Queue
+                    MaintMode = $MaintMode
+                    ClusterNode = $ClusterNode
                 }
                 $Obj_Arr += $Object
-                If (!($Online)) {
-                    $ExchangeServers = $ExchangeServers |? {$_.name -ne $Server}
-                }
-                    
+
             }
-            $Obj_Arr|ft Name,Online
-
-
-		    ### Hub Transport ###
-            Write-Verbose "Executing Get-ServerComponentState"
-            Write-Host -ForegroundColor Yellow "Hub Tansport status"
-            $Obj_Arr = @()
-            foreach ($Server in $ExchangeServers.name) {
-                $Obj_Arr += Get-ServerComponentState -Identity $Server -Component HubTransport
-            }
-            $Obj_Arr|ft
-
-        
-		    ### Queue summary ###
-            Write-Verbose "Executing Get-Queue"
-            Write-Host -ForegroundColor Yellow "Mail Queue status"
-            $Obj_Arr = @()
-            foreach ($Server in $ExchangeServers.name) {
-                $Object = New-Object Psobject -Property @{
-                    Name = $Server
-                    Queue = (Get-Queue -Server $Server | Measure-Object -Property MessageCount -Sum).Sum
-                }
-                $Obj_Arr += $Object
-            }
-            $Obj_Arr|ft Name,Queue
-
-
-		    ### Cluster Nodes ###
-            Write-Verbose "Executing Get-ClusterNode"
-            Write-Host -ForegroundColor Yellow "Cluster Node status"
-            If ($RunLocal)
-            {
-                Get-ClusterNode |ft Name,State
-            }
-            Else
-            {
-                Invoke-Command -ComputerName $ExchangeServers[0].name -ScriptBlock {
-                    Get-ClusterNode |ft Name,State
-                }
-            }   
 
 
             ### Mailbox Database Copy Status ###
             Write-Verbose "Executing get-mailboxdatabasecopystatus"
-            Write-Host -ForegroundColor Yellow "Mailbox Database Copy status"
             $Databases = get-mailboxdatabasecopystatus *|sort ActiveDatabaseCopy,Name
-            foreach ($database in $databases) {
-                if ($database.DatabaseSeedStatus) {
+            foreach ($database in $databases)
+            {
+                if ($database.DatabaseSeedStatus)
+                {
                     $database| Add-Member –MemberType NoteProperty –Name "Seed%" –Value $database.DatabaseSeedStatus.split(';').split(':')[1]
                 }
             }
+
+
+            ### Output ###
+            $Obj_Arr|ft Name,Online,HubTransport,Queue,MaintMode,ClusterNode
+
             $Databases|ft Name,@{l="Pref.";e={$_.ActivationPreference}},@{l="Active";e={$_.ActiveDatabaseCopy}},AutoActivationPolicy,@{l="Dis.&Move";e={$_.ActivationDisabledAndMoveNow}},Status,@{l="Index";e={$_.ContentIndexState}},@{l="Queue";e={$_.CopyQueueLength}},@{l="Disk%";e={$_.DiskFreeSpacePercent}},Seed% -auto
 
-            # Warn if any are unhealthy
-            If ($Databases|? {($_.status) -notlike "*Healthy*" -and ($_.status) -notlike "*Mounted*"}) {
+            # Warn if any DBs are unhealthy
+            If ($Databases|? {($_.status) -notlike "*Healthy*" -and ($_.status) -notlike "*Mounted*"})
+            {
                 Write-Host -ForegroundColor Red "Problem database(s) were found!"
-                Sound-Warning.ps1
-            } Else {
+            }
+            Else
+            {
                 Write-Host -ForegroundColor Green "All Mailbox database copies are healthy!"
             }
 
 
-<#		    ### Component States ###
-            Write-Verbose "Executing Get-PExMaintenanceMode"
-            Write-Host -ForegroundColor Yellow "PExMaintenceMode status"
-            $Obj_Arr = @()
-            foreach ($Server in $ExchangeServers.Name) {
-                $Obj_Arr += Get-PExMaintenanceMode $Server
-            }
-            $Obj_Arr|ft
-#>
-
-
-
-
-
-
-
-
-# Output
-
-
-
-
-
-
-
-
-
+            ### Sleepy time ###
             Write-Verbose "Executing Start-Sleep"
+    		Write-Verbose "$FunctionName :: Sleeping $DelaySec seconds at [$(Get-Date)]" -Verbose:$True
             Start-Sleep $DelaySec
 
             Write-Host "`n`n`n`n`n"
