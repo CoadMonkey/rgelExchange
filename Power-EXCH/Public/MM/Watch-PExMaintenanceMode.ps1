@@ -16,6 +16,7 @@
     Version 1.0 :: 21-Aug-2024  :: [Release] :: Beta -CoadMonkey
     Version 2.0 :: 28-Aug-2025  :: [Improvement] :: Improve output and streamline. Added configurable delay.
     Version 2.1 :: 29-Aug-2025  :: [Improvement] :: Improve output by doing all processing first and combining output objects.
+    Version 2.2 :: 01-Sep-2025  :: [Improvement] :: Small output improvements.
 
 .LINK
 
@@ -35,6 +36,12 @@
 	
 	Begin
 	{
+        Function Spin {
+            New-Variable -Scope Global -Name SpinCounter -Description "This is the Global counter variable for Spin function." -ErrorAction SilentlyContinue
+            $spin="/-\|"
+            Write-Host "`b$($spin.Substring($Global:SpinCounter++%$spin.Length,1))" -nonewline
+        } #End Function Spin
+
         $FunctionName = '{0}' -f $MyInvocation.MyCommand
 
 	}
@@ -44,9 +51,11 @@
         While ($true) {
 
     		Write-Verbose "$FunctionName :: Started at [$(Get-Date)]" -Verbose:$True
+            IF ($Host.Name -notlike "*ISE*") {spin}
 
             ### Gather server information ###
             Write-Verbose "Executing Get-ExchangeServer"
+            IF ($Host.Name -notlike "*ISE*") {spin}
             $ExchangeServers = Get-ExchangeServer | sort Name
             If (!($ExchangeServers)) {
                 Write-Error "Unable to get Exchange Servers" -Verbose:$True
@@ -69,6 +78,7 @@
                 ### Test Connection ###
                 Write-Verbose "Executing Test-Connection"
                 $Online = Test-Connection $Server -Count 1 -Quiet
+                IF ($Host.Name -notlike "*ISE*") {spin}
                 
 
                 If ($Online)
@@ -78,11 +88,13 @@
 		            ### Hub Transport ###
                     Write-Verbose "Executing Get-ServerComponentState"
                     $HubTransport = (Get-ServerComponentState -Identity $Server -Component HubTransport).State
+                    IF ($Host.Name -notlike "*ISE*") {spin}
 
         
 		            ### Queue totals ###
                     Write-Verbose "Executing Get-Queue"
                     $Queue = (Get-Queue -Server $Server | Measure-Object -Property MessageCount -Sum).Sum
+                    IF ($Host.Name -notlike "*ISE*") {spin}
 
 
 		            ### Cluster Nodes ###
@@ -101,11 +113,13 @@
                         }   
                     }
                     $ClusterNode = ($ClusterNodeArray|Where-Object {$_.Name -eq $Server}).State
+                    IF ($Host.Name -notlike "*ISE*") {spin}
 
 
 		            ### Maintenance Mode ###
                     Write-Verbose "Executing Get-PExMaintenanceMode"
                     $MaintMode = (Get-PExMaintenanceMode $Server).State
+                    IF ($Host.Name -notlike "*ISE*") {spin}
 
                 }
 
@@ -134,22 +148,20 @@
                 {
                     $database| Add-Member –MemberType NoteProperty –Name "Seed%" –Value $database.DatabaseSeedStatus.split(';').split(':')[1]
                 }
+                IF ($Host.Name -notlike "*ISE*") {spin}
             }
 
 
             ### Output ###
-            $Obj_Arr|ft Name,Online,HubTransport,Queue,MaintMode,ClusterNode
-
-            $Databases|ft Name,@{l="Active";e={$_.ActiveDatabaseCopy}},AutoActivationPolicy,@{l="Pref.";e={$_.ActivationPreference}},@{l="Dis.&Move";e={$_.ActivationDisabledAndMoveNow}},Status,@{l="Index";e={$_.ContentIndexState}},@{l="Queue";e={$_.CopyQueueLength}},@{l="Disk%";e={$_.DiskFreeSpacePercent}},Seed% -auto
+            Write-Host "`b " -NoNewline     # Clear the spinner
+            $Obj_Arr|ft Name,Online,HubTransport,@{l="MsgQueue";e={$_.Queue}},ClusterNode,MaintMode
+            
+            $Databases|ft Name,@{l="Active";e={$_.ActiveDatabaseCopy}},@{l="ActivationPolicy";e={$_.AutoActivationPolicy}},@{l="Act.Pref";e={$_.ActivationPreference}},@{l="Dis.&Move";e={$_.ActivationDisabledAndMoveNow}},Status,@{l="IndexState";e={$_.ContentIndexState}},@{l="CopyQueue";e={$_.CopyQueueLength}},@{l="Disk%";e={$_.DiskFreeSpacePercent}},Seed% -auto
 
             # Warn if any DBs are unhealthy
             If ($Databases|? {($_.status) -notlike "*Healthy*" -and ($_.status) -notlike "*Mounted*"})
             {
                 Write-Host -ForegroundColor Red "Problem database(s) were found!"
-            }
-            Else
-            {
-                Write-Host -ForegroundColor Green "All Mailbox database copies are healthy!"
             }
 
 
