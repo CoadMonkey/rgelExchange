@@ -140,7 +140,7 @@
             ### Output ###
             $Obj_Arr|ft Name,Online,HubTransport,Queue,MaintMode,ClusterNode
 
-            $Databases|ft Name,@{l="Pref.";e={$_.ActivationPreference}},@{l="Active";e={$_.ActiveDatabaseCopy}},AutoActivationPolicy,@{l="Dis.&Move";e={$_.ActivationDisabledAndMoveNow}},Status,@{l="Index";e={$_.ContentIndexState}},@{l="Queue";e={$_.CopyQueueLength}},@{l="Disk%";e={$_.DiskFreeSpacePercent}},Seed% -auto
+            $Databases|ft Name,@{l="Active";e={$_.ActiveDatabaseCopy}},AutoActivationPolicy,@{l="Pref.";e={$_.ActivationPreference}},@{l="Dis.&Move";e={$_.ActivationDisabledAndMoveNow}},Status,@{l="Index";e={$_.ContentIndexState}},@{l="Queue";e={$_.CopyQueueLength}},@{l="Disk%";e={$_.DiskFreeSpacePercent}},Seed% -auto
 
             # Warn if any DBs are unhealthy
             If ($Databases|? {($_.status) -notlike "*Healthy*" -and ($_.status) -notlike "*Mounted*"})
