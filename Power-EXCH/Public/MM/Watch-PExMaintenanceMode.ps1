@@ -66,14 +66,18 @@
             If ($env:COMPUTERNAME -in $ExchangeServers.name) { $RunLocal = $True }
 
 
-            ### Reset variables ###
+            ### Sanitize Variables ###
             $Obj_Arr = @()
-            Remove-Variable Object,Server,Online,HubTransport,Queue,MaintMode,ClusterNodeArray -ErrorAction SilentlyContinue
+            Remove-Variable ClusterNodeArray -ErrorAction SilentlyContinue
 
 
             ### Server Checks ###
             foreach ($Server in $ExchangeServers.name)
             {
+
+                
+                ### Sanitize Variables ###
+                Remove-Variable Object,Online,HubTransport,Queue,MaintMode -ErrorAction SilentlyContinue
 
 
                 ### Test Connection ###
