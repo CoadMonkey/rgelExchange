@@ -17,6 +17,7 @@
     Version 2.0 :: 28-Aug-2025  :: [Improvement] :: Improve output and streamline. Added configurable delay.
     Version 2.1 :: 29-Aug-2025  :: [Improvement] :: Improve output by doing all processing first and combining output objects.
     Version 2.2 :: 01-Sep-2025  :: [Improvement] :: Small output improvements.
+    Version 2.3 :: 04-Sep-2025  :: [Improvement] :: Output improvement for ClusterNode.
 
 .LINK
 
