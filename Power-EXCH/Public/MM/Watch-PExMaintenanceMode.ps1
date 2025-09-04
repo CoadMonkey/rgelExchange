@@ -112,7 +112,6 @@
                             }
                         }   
                     }
-                    $ClusterNode = ($ClusterNodeArray|Where-Object {$_.Name -eq $Server}).State
                     IF ($Host.Name -notlike "*ISE*") {spin}
 
 
@@ -132,10 +131,17 @@
                     HubTransport = $HubTransport
                     Queue = $Queue
                     MaintMode = $MaintMode
-                    ClusterNode = $ClusterNode
+                    ClusterNode = "Pending..."
                 }
                 $Obj_Arr += $Object
 
+            }
+
+            
+            ### Add ClusterNode info to output array ###
+            foreach ($Server in $ExchangeServers.name)
+            {
+                ($Obj_Arr|Where-Object {$_.Name -eq $Server}).ClusterNode = ($ClusterNodeArray|Where-Object {$_.Name -eq $Server}).State
             }
 
 
