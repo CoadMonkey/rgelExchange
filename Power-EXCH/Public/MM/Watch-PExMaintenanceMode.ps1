@@ -68,7 +68,7 @@
 
             ### Reset variables ###
             $Obj_Arr = @()
-            Remove-Variable Object,Server,Online,HubTransport,Queue,MaintMode,ClusterNode -ErrorAction SilentlyContinue
+            Remove-Variable Object,Server,Online,HubTransport,Queue,MaintMode,ClusterNodeArray -ErrorAction SilentlyContinue
 
 
             ### Server Checks ###
