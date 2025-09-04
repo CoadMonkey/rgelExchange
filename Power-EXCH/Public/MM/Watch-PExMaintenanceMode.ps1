@@ -177,9 +177,13 @@
 
 
             ### Sleepy time ###
-            Write-Verbose "Executing Start-Sleep"
     		Write-Verbose "$FunctionName :: Sleeping $DelaySec seconds at [$(Get-Date)]" -Verbose:$True
-            Start-Sleep $DelaySec
+            $a = (Get-Date).AddSeconds($DelaySec)
+            While ((Get-Date) -le $a) { 
+                spin
+                sleep -Milliseconds 100
+            }
+            Write-Host "`b "
 
             Write-Host "`n`n`n`n`n"
         }
