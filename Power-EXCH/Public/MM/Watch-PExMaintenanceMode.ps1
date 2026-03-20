@@ -8,6 +8,8 @@
 	This function displays Exchange Maintenance Mode items in summary.
 .PARAMETER DelaySec
     Configurable delay between loop itterations.
+.PARAMETER AdditionalDNSNamespaces
+    Addtional Namespaces to test DNS resolution.
 .EXAMPLE
 	PS C:\> Watch-PExMaintenanceMode
 .NOTES
@@ -19,6 +21,7 @@
     Version 2.2 :: 01-Sep-2025  :: [Improvement] :: Small output improvements.
     Version 2.3 :: 04-Sep-2025  :: [Improvement] :: Output improvements (GitHub Issues #6,7,9)
     Version 2.4 :: 28-Oct-2025  :: [Improvement] :: Add Namespace DNS checks.
+    Version 2.5 :: 20-Mar-2026  :: [Improvement] :: Added parameter for additional DNS Namespaces. Added support for multiple DAGs in the org.
 
 .LINK
 
@@ -31,7 +34,12 @@
 				    Position = 0
 				    )]
             [int]
-            $DelaySec = 10
+            $DelaySec = 10,
+
+        # Addtional Namespaces to test DNS resolution
+        [Parameter ( Mandatory = $False)]
+            [string[]]
+            $AdditionalDNSNamespaces
 
     )
 
@@ -100,23 +108,35 @@
                 IPAddress = $Null
             }
             $DNSNameSpaces += $Object
+            foreach ($DNSNameSpace in $AdditionalDNSNamespaces) {
+                $Object = New-Object Psobject -Property @{
+                    DNSNameSpace = $DNSNameSpace
+                    IPAddress = $Null
+                }
+                $DNSNameSpaces += $Object
+            }
             [Array]$DNSNameSpaces = $DNSNameSpaces|sort DNSNameSpace -Unique
             IF ($Host.Name -notlike "*ISE*") {spin}
                         
 
 		    ### Cluster Nodes ###
-            Write-Verbose "Executing Get-ClusterNode"
-            If ($RunLocal)
+            $ClusterNodeArray = @()
+            $DAGs = Get-DatabaseAvailabilityGroup
+            foreach ($Dag in $DAGs)
             {
-                $ClusterNodeArray = Get-ClusterNode
-            }
-            Else
-            {
-                $ClusterNodeArray = Invoke-Command -ComputerName (($ExchangeServers| sort ResponseTime)[0]).name -ScriptBlock {
-                    Get-ClusterNode
+                Write-Verbose "Executing Get-ClusterNode"
+                If ($RunLocal -and $env:COMPUTERNAME -in ($Dag.Servers))
+                {
+                    $ClusterNodeArray += Get-ClusterNode
                 }
-            }   
-            IF ($Host.Name -notlike "*ISE*") {spin}
+                Else
+                {
+                    $ClusterNodeArray += Invoke-Command -ComputerName (($ExchangeServers|? {$_.name -in $Dag.Servers}| sort ResponseTime)[0]).name  -ScriptBlock {
+                        Get-ClusterNode
+                    }
+                }   
+                IF ($Host.Name -notlike "*ISE*") {spin}
+            }
 
 
             ### Server Checks ###
@@ -126,7 +146,7 @@
 
                 ### Sanitize Variables ###
                 $OWAURLs = @()
-                Remove-Variable Object,HubTransport,Queue,MaintMode,ResponseTime -ErrorAction SilentlyContinue
+                Remove-Variable Object,HubTransport,Queue,MaintMode,ResponseTime,DNSNamespace -ErrorAction SilentlyContinue
 
 
 		        ### Hub Transport ###
@@ -170,10 +190,11 @@
                     Else
                     {
                         $DNSNameSpace.IPAddress = Invoke-Command -ComputerName $Server.Name -ScriptBlock {
-                            ((Resolve-DnsName -Name $Using:DNSNameSpace.DNSNameSpace -DnsOnly)[0]).IPAddress
+                            #((Resolve-DnsName -Name $Using:DNSNameSpace.DNSNameSpace -DnsOnly)[0]).IPAddress
+                            ((Resolve-DnsName -Name $Using:DNSNameSpace.DNSNameSpace -DnsOnly)).IPAddress
                         }
                     }
-                    $Object | Add-Member -MemberType NoteProperty -Name $DNSNameSpace.DNSNameSpace -Value $DNSNameSpace.IPAddress
+                    $Object | Add-Member -MemberType NoteProperty -Name $DNSNameSpace.DNSNameSpace -Value $DNSNameSpace.IPAddress -Force
                     IF ($Host.Name -notlike "*ISE*") {spin}                
                 }
 
