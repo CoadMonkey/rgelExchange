@@ -7,7 +7,7 @@
 .DESCRIPTION
 	This function displays Exchange Maintenance Mode items in summary.
 .PARAMETER DelaySec
-    Configurable delay between loop itterations.
+    Configurable delay between loop itterations. Default 10 sec.
 .PARAMETER AdditionalDNSNamespaces
     Addtional Namespaces to test DNS resolution.
 .EXAMPLE
@@ -15,13 +15,14 @@
 .NOTES
 	Author      :: @ps1code
 	Dependency  :: Function     :: Get-PExMaintenanceMode
-    Version 1.0 :: 21-Aug-2024  :: [Release] :: Beta -CoadMonkey
+    Version 1.0 :: 21-Aug-2024  :: [Release]     :: Beta -CoadMonkey
     Version 2.0 :: 28-Aug-2025  :: [Improvement] :: Improve output and streamline. Added configurable delay.
     Version 2.1 :: 29-Aug-2025  :: [Improvement] :: Improve output by doing all processing first and combining output objects.
     Version 2.2 :: 01-Sep-2025  :: [Improvement] :: Small output improvements.
     Version 2.3 :: 04-Sep-2025  :: [Improvement] :: Output improvements (GitHub Issues #6,7,9)
     Version 2.4 :: 28-Oct-2025  :: [Improvement] :: Add Namespace DNS checks.
     Version 2.5 :: 20-Mar-2026  :: [Improvement] :: Added parameter for additional DNS Namespaces. Added support for multiple DAGs in the org.
+    version 2.6 :: 24-Jun-2026  :: [Improvement] :: Better handling for offline servers.
 
 .LINK
 
@@ -62,7 +63,6 @@
 
     		Write-Verbose "$FunctionName :: Started at [$(Get-Date)]" -Verbose:$True
 
-
             ### Sanitize Variables ###
             Write-Verbose "Sanitizing Variables"
             $Obj_Arr = @()
@@ -73,19 +73,22 @@
             ### Gather server information ###
             Write-Verbose "Executing Get-ExchangeServer"
             $ExchangeServers = Get-ExchangeServer | sort Name
+
+
             If (!($ExchangeServers)) {
                 Write-Error "Unable to get Exchange Servers" -Verbose:$True
                 throw "Unable to get Exchange Servers"
             }
             IF ($Host.Name -notlike "*ISE*") {spin}
 
+            ## Update Server ResponseTimes
             foreach ($Server in $ExchangeServers) {
-                Write-Verbose "Executing Test-Connection $Server"
+                Write-Verbose "Executing Test-Connection $($Server.name)"
                 $ResponseTime = (Test-Connection -ComputerName $Server.name -Count 1).ResponseTime
                 If ($ResponseTime) {
                     $Server | Add-Member -MemberType NoteProperty -Name ResponseTime -Value $ResponseTime -Force
                 } Else {
-                    $Server | Add-Member -MemberType NoteProperty -Name ResponseTime -Value $False -Force
+                    $Server | Add-Member -MemberType NoteProperty -Name ResponseTime -Value 999 -Force
                 }
                 IF ($Host.Name -notlike "*ISE*") {spin}
             }
@@ -139,71 +142,98 @@
             }
 
 
-            ### Server Checks ###
-            foreach ($Server in $ExchangeServers | Where-Object {$_.ResponseTime -ne $False})
-            {
+            ## Update Server ResponseTimes
+            foreach ($Server in $ExchangeServers) {
+                Write-Verbose "Executing Test-Connection $($Server.name)"
+                $ResponseTime = (Test-Connection -ComputerName $Server.name -Count 1).ResponseTime
+                If ($ResponseTime) {
+                    $Server | Add-Member -MemberType NoteProperty -Name ResponseTime -Value $ResponseTime -Force
+                } Else {
+                    $Server | Add-Member -MemberType NoteProperty -Name ResponseTime -Value 999 -Force
+                }
+                IF ($Host.Name -notlike "*ISE*") {spin}
+            }
 
+
+            ### Server Checks ###
+            foreach ($Server in $ExchangeServers)
+            {
 
                 ### Sanitize Variables ###
                 $OWAURLs = @()
                 Remove-Variable Object,HubTransport,Queue,MaintMode,ResponseTime,DNSNamespace -ErrorAction SilentlyContinue
 
-
-		        ### Hub Transport ###
-                Write-Verbose "Executing Get-ServerComponentState"
-                $HubTransport = (Get-ServerComponentState -Identity $Server.Name -Component HubTransport).State
-                IF ($Host.Name -notlike "*ISE*") {spin}
-
-        
-		        ### Queue totals ###
-                Write-Verbose "Executing Get-Queue"
-                $Queue = (Get-Queue -Server $Server.Name | Measure-Object -Property MessageCount -Sum).Sum
-                IF ($Host.Name -notlike "*ISE*") {spin}
-
-
-		        ### Maintenance Mode ###
-                Write-Verbose "Executing Get-PExMaintenanceMode"
-                $MaintMode = Get-PExMaintenanceMode $Server.Name
-                IF ($Host.Name -notlike "*ISE*") {spin}
-
-
-                ### Build Output object ###
-                Write-Verbose "Building output object"
+                ### Initialize Output object ###
+                Write-Verbose "Initializing output object"
                 $Object = New-Object Psobject -Property @{
                     Name = $Server.Name
                     "Time(ms)" = $Server.ResponseTime
-                    HubTransport = $HubTransport
-                    Queue = $Queue
-                    "MaintMode" = "$($MaintMode.state)($($MaintMode.TotalActiveComponent))"
-                    Cluster = "Pending..."
+                    HubTransport = $Null
+                    Queue = $Null
+                    "MaintMode" = $Null
+                    Cluster = $Null
+                    # $DNSNameSpaces are added later
                 }
                 IF ($Host.Name -notlike "*ISE*") {spin}
 
 
-                ### Name Resolution ###
-                foreach ($DNSNameSpace in $DNSNameSpaces) {
-                    Write-Verbose "Executing Resolve-DnsName"
-                    If ($RunLocal)
-                    {
-                        $DNSNameSpace.IPAddress = (Resolve-DnsName -Name $DNSNameSpace.DNSNameSpace -DnsOnly)[0]
-                    }
-                    Else
-                    {
-                        $DNSNameSpace.IPAddress = Invoke-Command -ComputerName $Server.Name -ScriptBlock {
-                            #((Resolve-DnsName -Name $Using:DNSNameSpace.DNSNameSpace -DnsOnly)[0]).IPAddress
-                            ((Resolve-DnsName -Name $Using:DNSNameSpace.DNSNameSpace -DnsOnly)).IPAddress
+                If ($Server.ResponseTime -lt 60) {
+
+		            ### Hub Transport ###
+                    Write-Verbose "Executing Get-ServerComponentState"
+                    $HubTransport = (Get-ServerComponentState -Identity $Server.Name -Component HubTransport).State
+                    IF ($Host.Name -notlike "*ISE*") {spin}
+
+        
+		            ### Queue totals ###
+                    Write-Verbose "Executing Get-Queue"
+                    $Queue = (Get-Queue -Server $Server.Name -ErrorAction SilentlyContinue | Measure-Object -Property MessageCount -Sum).Sum
+                    IF ($Host.Name -notlike "*ISE*") {spin}
+
+
+		            ### Maintenance Mode ###
+                    Write-Verbose "Executing Get-PExMaintenanceMode"
+                    $MaintMode = Get-PExMaintenanceMode $Server.Name
+                    IF ($Host.Name -notlike "*ISE*") {spin}
+
+
+                    ### Name Resolution ###
+                    foreach ($DNSNameSpace in $DNSNameSpaces) {
+                        Write-Verbose "Executing Resolve-DnsName"
+                        If ($RunLocal)
+                        {
+                            $DNSNameSpace.IPAddress = (Resolve-DnsName -Name $DNSNameSpace.DNSNameSpace -DnsOnly)[0]
                         }
+                        Else
+                        {
+                            $DNSNameSpace.IPAddress = Invoke-Command -ComputerName $Server.Name -ScriptBlock {
+                                ((Resolve-DnsName -Name $Using:DNSNameSpace.DNSNameSpace -DnsOnly)).IPAddress
+                            }
+                        }
+                        $Object | Add-Member -MemberType NoteProperty -Name $DNSNameSpace.DNSNameSpace -Value $DNSNameSpace.IPAddress -Force
+                        IF ($Host.Name -notlike "*ISE*") {spin}                
                     }
-                    $Object | Add-Member -MemberType NoteProperty -Name $DNSNameSpace.DNSNameSpace -Value $DNSNameSpace.IPAddress -Force
-                    IF ($Host.Name -notlike "*ISE*") {spin}                
                 }
 
+
+                ### Update Output object ###
+                Write-Verbose "Updating output object"
+                #$Object.Name = $Server.Name
+                #$Object."Time(ms)" = $Server.ResponseTime
+                $Object.HubTransport = $HubTransport
+                $Object.Queue = $Queue
+                $Object."MaintMode" = "$($MaintMode.state)($($MaintMode.TotalActiveComponent))"
+                $Object.Cluster = "Pending..."
+
+                IF ($Host.Name -notlike "*ISE*") {spin}
+                
 
                 $Obj_Arr += $Object
             }
 
             
             ### Add ClusterNode info to output array ###
+            Write-Verbose "Adding Cluster Node info to output array"
             foreach ($Server in $ExchangeServers.name)
             {
                 ($Obj_Arr|Where-Object {$_.Name -eq $Server}).Cluster = ($ClusterNodeArray|Where-Object {$_.Name -eq $Server}).State
