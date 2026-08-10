@@ -23,6 +23,7 @@
     Version 2.4 :: 28-Oct-2025  :: [Improvement] :: Add Namespace DNS checks.
     Version 2.5 :: 20-Mar-2026  :: [Improvement] :: Added parameter for additional DNS Namespaces. Added support for multiple DAGs in the org.
     version 2.6 :: 24-Jun-2026  :: [Improvement] :: Better handling for offline servers.
+    Version 2.7 :: 10-Aug-2026  :: [Bugfix]      :: Correct errors when server online but services are stopped.
 
 .LINK
 
@@ -66,7 +67,7 @@
             ### Sanitize Variables ###
             Write-Verbose "Sanitizing Variables"
             $Obj_Arr = @()
-            Remove-Variable ExchangeServers,Server,ResponseTime,RunLocal,OWAURLs,ClusterNodeArray,OLAnywhereHostnames,DNSNameSpaces,Object -ErrorAction SilentlyContinue
+            Remove-Variable ExchangeServers,Server,ResponseTime,RunLocal,OWAURLs,ClusterNodeArray,OLAnywhereHostnames,DNSNameSpaces,Object,ClosestNonMMServer -ErrorAction SilentlyContinue
             IF ($Host.Name -notlike "*ISE*") {spin}
 
 
@@ -93,13 +94,32 @@
                 IF ($Host.Name -notlike "*ISE*") {spin}
             }
 
+            # Determine if executing from Exchange server or remotely (i.e admin workstation)
             $RunLocal = $False
             If ($env:COMPUTERNAME -in $ExchangeServers.name) { $RunLocal = $True }
 
 
+            # Determine closest server that is not in maintenance mode to execute certian commands from
+            Write-Verbose "Executing Get-PExMaintenanceMode"
+            $MaintMode = $ExchangeServers | Get-PExMaintenanceMode
+            $Index = 0
+            while ($ClosestNonMMServer -eq $Null -and $Index -le $ExchangeServers.count -1) {
+                If ((($ExchangeServers| sort ResponseTime)[$Index]).name -in ($MaintMode|Where-Object {$_.State -ne "Maintenance"}).Server) {
+                    $ClosestNonMMServer = (($ExchangeServers| sort ResponseTime)[$Index]).name
+                } Else {
+                    $Index++
+                }
+            }
+            If ($ClosestNonMMServer -eq $Null) {
+                Write-Error "Error getting closest non MM server"
+                continue
+            }
+            Write-Verbose "Closest server not in maintenance mode is $ClosestNonMMServer"
+
+
             ### DNS Namespace(s) ###
             Write-Verbose "Executing Get-OutlookAnywhere"
-            $OLAnywhereHostnames = Get-OutlookAnywhere -Server (($ExchangeServers| sort ResponseTime)[0]).name|select *ternalHostname
+            $OLAnywhereHostnames = Get-OutlookAnywhere -Server $ClosestNonMMServer | select *ternalHostname
             $DNSNameSpaces = @()
             $Object = New-Object Psobject -Property @{
                 DNSNameSpace = $OLAnywhereHostnames.ExternalHostname
@@ -161,7 +181,7 @@
 
                 ### Sanitize Variables ###
                 $OWAURLs = @()
-                Remove-Variable Object,HubTransport,Queue,MaintMode,ResponseTime,DNSNamespace -ErrorAction SilentlyContinue
+                Remove-Variable Object,HubTransport,Queue,ResponseTime,DNSNamespace -ErrorAction SilentlyContinue
 
                 ### Initialize Output object ###
                 Write-Verbose "Initializing output object"
@@ -191,12 +211,6 @@
                     IF ($Host.Name -notlike "*ISE*") {spin}
 
 
-		            ### Maintenance Mode ###
-                    Write-Verbose "Executing Get-PExMaintenanceMode"
-                    $MaintMode = Get-PExMaintenanceMode $Server.Name
-                    IF ($Host.Name -notlike "*ISE*") {spin}
-
-
                     ### Name Resolution ###
                     foreach ($DNSNameSpace in $DNSNameSpaces) {
                         Write-Verbose "Executing Resolve-DnsName"
@@ -214,7 +228,7 @@
                         IF ($Host.Name -notlike "*ISE*") {spin}                
                     }
                 }
-
+                
 
                 ### Update Output object ###
                 Write-Verbose "Updating output object"
@@ -222,7 +236,7 @@
                 #$Object."Time(ms)" = $Server.ResponseTime
                 $Object.HubTransport = $HubTransport
                 $Object.Queue = $Queue
-                $Object."MaintMode" = "$($MaintMode.state)($($MaintMode.TotalActiveComponent))"
+                $Object."MaintMode" = "$(($MaintMode|Where-Object {$_.Server -eq $Server.name}).state)($(($MaintMode|Where-Object {$_.Server -eq $Server.name}).TotalActiveComponent))"
                 $Object.Cluster = "Pending..."
 
                 IF ($Host.Name -notlike "*ISE*") {spin}
