@@ -24,6 +24,9 @@
     Version 2.5 :: 20-Mar-2026  :: [Improvement] :: Added parameter for additional DNS Namespaces. Added support for multiple DAGs in the org.
     version 2.6 :: 24-Jun-2026  :: [Improvement] :: Better handling for offline servers.
     Version 2.7 :: 10-Aug-2026  :: [Bugfix]      :: Correct errors when server online but services are stopped.
+    Version 2.8 :: 19-Aug-2026  :: [Bugfix]      :: DNSNameSpace taking full object instead of just IP Address.
+                                                    Very low latency checks (0ms) are incorrectly set as 999ms.
+                                                    When the first server is tagged as 999 ms several items are missing from output object.
 
 .LINK
 
@@ -67,7 +70,7 @@
             ### Sanitize Variables ###
             Write-Verbose "Sanitizing Variables"
             $Obj_Arr = @()
-            Remove-Variable ExchangeServers,Server,ResponseTime,RunLocal,OWAURLs,ClusterNodeArray,OLAnywhereHostnames,DNSNameSpaces,Object,ClosestNonMMServer -ErrorAction SilentlyContinue
+            Remove-Variable ExchangeServers,Server,RunLocal,OWAURLs,ClusterNodeArray,OLAnywhereHostnames,DNSNameSpaces,Object,ClosestNonMMServer -ErrorAction SilentlyContinue
             IF ($Host.Name -notlike "*ISE*") {spin}
 
 
@@ -84,9 +87,10 @@
 
             ## Update Server ResponseTimes
             foreach ($Server in $ExchangeServers) {
+                Remove-Variable ResponseTime -ErrorAction SilentlyContinue
                 Write-Verbose "Executing Test-Connection $($Server.name)"
                 $ResponseTime = (Test-Connection -ComputerName $Server.name -Count 1).ResponseTime
-                If ($ResponseTime) {
+                If ($ResponseTime -ne $Null) {
                     $Server | Add-Member -MemberType NoteProperty -Name ResponseTime -Value $ResponseTime -Force
                 } Else {
                     $Server | Add-Member -MemberType NoteProperty -Name ResponseTime -Value 999 -Force
@@ -139,6 +143,7 @@
                 $DNSNameSpaces += $Object
             }
             [Array]$DNSNameSpaces = $DNSNameSpaces|sort DNSNameSpace -Unique
+            Write-Verbose "DNSNameSpaces are $(($DNSNameSpaces).DNSNameSpace -join ", ")."
             IF ($Host.Name -notlike "*ISE*") {spin}
                         
 
@@ -147,7 +152,7 @@
             $DAGs = Get-DatabaseAvailabilityGroup
             foreach ($Dag in $DAGs)
             {
-                Write-Verbose "Executing Get-ClusterNode"
+                Write-Verbose "Executing Get-ClusterNode for DAG `"$($Dag.Name)`""
                 If ($RunLocal -and $env:COMPUTERNAME -in ($Dag.Servers))
                 {
                     $ClusterNodeArray += Get-ClusterNode
@@ -164,9 +169,10 @@
 
             ## Update Server ResponseTimes
             foreach ($Server in $ExchangeServers) {
+                Remove-Variable ResponseTime -ErrorAction SilentlyContinue
                 Write-Verbose "Executing Test-Connection $($Server.name)"
                 $ResponseTime = (Test-Connection -ComputerName $Server.name -Count 1).ResponseTime
-                If ($ResponseTime) {
+                If ($ResponseTime -ne $Null) {
                     $Server | Add-Member -MemberType NoteProperty -Name ResponseTime -Value $ResponseTime -Force
                 } Else {
                     $Server | Add-Member -MemberType NoteProperty -Name ResponseTime -Value 999 -Force
@@ -181,10 +187,10 @@
 
                 ### Sanitize Variables ###
                 $OWAURLs = @()
-                Remove-Variable Object,HubTransport,Queue,ResponseTime,DNSNamespace -ErrorAction SilentlyContinue
+                Remove-Variable Object,HubTransport,Queue,DNSNamespace -ErrorAction SilentlyContinue
 
                 ### Initialize Output object ###
-                Write-Verbose "Initializing output object"
+                Write-Verbose "Initializing output object for `"$($Server.Name)`""
                 $Object = New-Object Psobject -Property @{
                     Name = $Server.Name
                     "Time(ms)" = $Server.ResponseTime
@@ -192,7 +198,6 @@
                     Queue = $Null
                     "MaintMode" = $Null
                     Cluster = $Null
-                    # $DNSNameSpaces are added later
                 }
                 IF ($Host.Name -notlike "*ISE*") {spin}
 
@@ -200,23 +205,25 @@
                 If ($Server.ResponseTime -lt 60) {
 
 		            ### Hub Transport ###
-                    Write-Verbose "Executing Get-ServerComponentState"
+                    Write-Verbose "Executing Get-ServerComponentState for `"$($Server.Name)`""
                     $HubTransport = (Get-ServerComponentState -Identity $Server.Name -Component HubTransport).State
+                    $Object.HubTransport = $HubTransport
                     IF ($Host.Name -notlike "*ISE*") {spin}
 
         
 		            ### Queue totals ###
-                    Write-Verbose "Executing Get-Queue"
+                    Write-Verbose "Executing Get-Queue for `"$($Server.Name)`""
                     $Queue = (Get-Queue -Server $Server.Name -ErrorAction SilentlyContinue | Measure-Object -Property MessageCount -Sum).Sum
+                    $Object.Queue = $Queue
                     IF ($Host.Name -notlike "*ISE*") {spin}
 
 
                     ### Name Resolution ###
                     foreach ($DNSNameSpace in $DNSNameSpaces) {
-                        Write-Verbose "Executing Resolve-DnsName"
+                        Write-Verbose "Executing Resolve-DnsName for `"$($DNSNameSpace.DNSNameSpace)`" on `"$($Server.Name)`""
                         If ($RunLocal)
                         {
-                            $DNSNameSpace.IPAddress = (Resolve-DnsName -Name $DNSNameSpace.DNSNameSpace -DnsOnly)[0]
+                            $DNSNameSpace.IPAddress = ((Resolve-DnsName -Name $DNSNameSpace.DNSNameSpace -DnsOnly)[0]).IPAddress
                         }
                         Else
                         {
@@ -224,21 +231,27 @@
                                 ((Resolve-DnsName -Name $Using:DNSNameSpace.DNSNameSpace -DnsOnly)).IPAddress
                             }
                         }
-                        $Object | Add-Member -MemberType NoteProperty -Name $DNSNameSpace.DNSNameSpace -Value $DNSNameSpace.IPAddress -Force
+                        If ($DNSNameSpace.IPAddress -ne $Null) {
+                            $Object | Add-Member -MemberType NoteProperty -Name $DNSNameSpace.DNSNameSpace -Value $DNSNameSpace.IPAddress -Force
+                        } Else {
+                            $Object | Add-Member -MemberType NoteProperty -Name $DNSNameSpace.DNSNameSpace -Value "Failed" -Force
+                        }
                         IF ($Host.Name -notlike "*ISE*") {spin}                
                     }
+                } Else {
+                    $Object.HubTransport = "N/A"
+                    $Object.Queue = "N/A"
+                    foreach ($DNSNameSpace in $DNSNameSpaces) {
+                        $Object | Add-Member -MemberType NoteProperty -Name $DNSNameSpace.DNSNameSpace -Value "N/A" -Force
+                    }
+
                 }
                 
 
                 ### Update Output object ###
-                Write-Verbose "Updating output object"
-                #$Object.Name = $Server.Name
-                #$Object."Time(ms)" = $Server.ResponseTime
-                $Object.HubTransport = $HubTransport
-                $Object.Queue = $Queue
+                Write-Verbose "Updating output object for `"$($Server.Name)`""
                 $Object."MaintMode" = "$(($MaintMode|Where-Object {$_.Server -eq $Server.name}).state)($(($MaintMode|Where-Object {$_.Server -eq $Server.name}).TotalActiveComponent))"
                 $Object.Cluster = "Pending..."
-
                 IF ($Host.Name -notlike "*ISE*") {spin}
                 
 
@@ -268,7 +281,7 @@
 
 
             ### Output ###
-            Write-Host "`b " -NoNewline     # Clear the spinner
+            IF ($Host.Name -notlike "*ISE*") {Write-Host "`b " -NoNewline}     # Clear the spinner
 
             # Servers
             $Obj_Arr|ft Name,"Time(ms)",HubTransport,@{l="MsgQueue";e={$_.Queue}},Cluster,MaintMode,*.*
